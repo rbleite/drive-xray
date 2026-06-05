@@ -1,0 +1,37 @@
+drive-xray
+Copyright 2026 Ricardo Leite
+https://github.com/rbleite/drive-xray
+
+This product includes software developed by Ricardo Leite.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Derivative works must preserve this NOTICE file. See LICENSE
+section 4(d) for the exact obligation.
+
+---
+
+This software bundles or links to the following third-party components,
+each under their respective licenses. Their original copyrights are
+preserved here as required:
+
+* SQLite — public domain (https://sqlite.org/copyright.html)
+* BLAKE2b — CC0 / Apache-2.0 (https://github.com/BLAKE2/BLAKE2)
+* Streamlit — Apache-2.0 (https://streamlit.io)
+* Plotly — MIT (https://github.com/plotly/plotly.py)
+* openpyxl — MIT (https://openpyxl.readthedocs.io)
+* rusqlite — MIT (https://github.com/rusqlite/rusqlite)
+* blake2b_simd — MIT (https://github.com/oconnor663/blake2_simd)
+* jwalk — MIT (https://github.com/Byron/jwalk)
+* rayon — MIT / Apache-2.0 (https://github.com/rayon-rs/rayon)
+* clap — MIT / Apache-2.0 (https://github.com/clap-rs/clap)
+* chrono — MIT / Apache-2.0 (https://github.com/chronotope/chrono)
+* anyhow / thiserror — MIT / Apache-2.0 (https://github.com/dtolnay)
+* csv — Unlicense / MIT (https://github.com/BurntSushi/rust-csv)
+* rust_xlsxwriter — MIT (https://github.com/jmcnamara/rust_xlsxwriter)
+* mimalloc — MIT (https://github.com/microsoft/mimalloc)
+* hex — MIT / Apache-2.0 (https://github.com/KokaKiwi/rust-hex)

@@ -4,105 +4,107 @@
 
 # drive-xray
 
-**Saber exactamente o que tens em cada drive, e o que está duplicado entre elas.**
+**Know exactly what's on every drive, and what's redundant across them.**
 
 [![macOS](https://img.shields.io/badge/macOS-11+-black?logo=apple)](https://www.apple.com/macos/)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![Rust](https://img.shields.io/badge/Rust-1.75+-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 </div>
 
 ---
 
-## Para quem é isto
+## Who this is for
 
-Isto foi pensado para quem **vive com muitas drives USB espalhadas pela
-secretária**, lida com **ficheiros gigantes de bioinformática** (BAMs,
-FASTQs, VCFs alinhados), nutre **alguma paixão pela fotografia**
-(RAWs, projetos Lightroom, edições) — e quer ter a **certeza do que
-está armazenado em cada drive** e **qual a redundância** entre elas.
+This was built for people who **live with many USB drives scattered
+across their desk**, deal with **huge bioinformatics files** (BAMs,
+FASTQs, aligned VCFs), feel **some passion for photography** (RAWs,
+Lightroom projects, edits), and want to be **certain about what's
+stored on each drive** and **what's redundant** between them.
 
-Tipos de pergunta que isto responde:
+The kind of questions this answers:
 
-- "Já tenho este vídeo backuped, ou só está no SSD interno?"
-- "Que ficheiros novos apareceram no NAS desde a última semana?"
-- "O backup desta drive antiga ainda é o mesmo conteúdo, ou divergiu?"
-- "Se eu apagar tudo na drive externa #3, perco alguma coisa que não
-  esteja noutro lado?"
-- "Quais são as 10 pastas que mais cresceram no projecto este mês?"
+- *"Have I already backed up this video, or is it only on the
+  internal SSD?"*
+- *"Which new files showed up on the NAS since last week?"*
+- *"Is the backup of this old drive still the same content, or has it
+  drifted?"*
+- *"If I wipe external drive #3, will I lose anything that isn't
+  somewhere else?"*
+- *"What are the 10 folders that grew the most in this project this
+  month?"*
 
-A ideia central é simples: **cada drive ganha um "raio-x" — uma `.db`
-SQLite portátil** que sabe que ficheiros lá viviam, qual o tamanho,
-quando foram modificados, e o hash de cada um. Depois é só comparar.
-A drive pode estar desligada — o raio-x continua a responder.
+The core idea is simple: **each drive gets an "x-ray" — a portable
+SQLite `.db`** that remembers what files lived there, their size,
+when they were modified, and a hash of each. Then you just compare.
+The drive can be unplugged — the x-ray keeps answering.
 
 ---
 
-## Captura de ecrã
+## Screenshot
 
 <div align="center">
-<em>(coloca aqui um screenshot da UI quando estiver pronto)</em>
+<img src="assets/screenshot.png" alt="drive-xray UI — 8 TB drive with 1.4 M bioinformatics files" width="800"/>
+<br/>
+<sub>A real-world session: 1,415,091 files / 5.2 TB on an external 8 TB drive of sequencing data (BAMs, FASTQ.gz, pod5), <code>.db</code> compressed to just 648 MB with Tier-3 path interning. Engine: 🦀 Rust.</sub>
 </div>
 
 ---
 
-## O que faz
+## What it does
 
-- 🔍 **Indexa drives** (interno + externos) num `.db` SQLite portátil.
-  Hashing híbrido (BLAKE2b parcial + completo só onde precisa).
-- 🔁 **Encontra duplicados** dentro de uma drive, com detecção de
-  hardlinks (não conta cópias virtuais como espaço desperdiçado).
-- 📅 **Snapshots históricos** — tira "fotografias" mensais ou semanais e
-  vê diff: "+ 487 GB em sequencing/run-2025-06/, − 12 GB em tmp/".
-- ⚖️ **Compara duas drives** mesmo offline. "Esta cópia ainda é igual
-  ao original? Que ficheiros existem só num lado?"
-- 🗺️ **TreeMap interactivo** do espaço por pasta (estilo WizTree /
-  GrandPerspective).
-- 🧽 **Cleanup assistido** — gera um script `.sh` que tu **revês**
-  antes de correr. Quarentena ou delete; nunca apaga sozinho.
-- 📊 **Exporta** os duplicados em CSV ou XLSX para abrires no Excel.
-- 🦀 **Motor em Rust** opcional para drives grandes — ~10× mais
-  rápido a indexar 5 M ficheiros, **mesmo `.db` byte-a-byte**
-  compatível.
+- 🔍 **Index drives** (internal + external) into a portable SQLite
+  `.db`. Hybrid hashing (BLAKE2b partial + full only where needed).
+- 🔁 **Find duplicates** within a drive, with hardlink awareness
+  (virtual copies don't inflate the "wasted space" count).
+- 📅 **Historical snapshots** — take monthly/weekly "photos" and diff
+  them: "+ 487 GB in `sequencing/run-2025-06/`, − 12 GB in `tmp/`".
+- ⚖️ **Compare two drives** even offline. *"Is this copy still equal
+  to the original? Which files exist only on one side?"*
+- 🗺️ **Interactive TreeMap** of space by folder (WizTree / GrandPerspective style).
+- 🧽 **Assisted cleanup** — generates a `.sh` script you **review**
+  before running. Quarantine or delete; never deletes on its own.
+- 📊 **Export** duplicates to CSV or XLSX for Excel review.
+- 🦀 **Optional Rust engine** for large drives — ~10× faster on
+  5 M files, **byte-for-byte** compatible `.db` files.
 
-Defesas específicas para macOS:
+macOS-specific defenses:
 
-- `--one-filesystem` evita atravessar firmlinks do APFS (não conta os
-  teus ficheiros duas vezes via `/System/Volumes/Data`).
-- `--skip-cloud` ignora pastas iCloud / OneDrive / Google Drive /
-  Dropbox / Box / MEGA / Proton — não dispara downloads de ficheiros
-  "só online".
+- `--one-filesystem` avoids traversing APFS firmlinks (so your files
+  aren't double-counted via `/System/Volumes/Data`).
+- `--skip-cloud` ignores iCloud / OneDrive / Google Drive / Dropbox /
+  Box / MEGA / Proton folders — doesn't trigger downloads of
+  online-only files.
 
 ---
 
-## Instalação rápida
+## Quick install
 
 ```bash
-git clone https://github.com/<your-username>/drive-xray.git
+git clone https://github.com/rbleite/drive-xray.git
 cd drive-xray
 python3 -m venv .venv
 .venv/bin/pip install streamlit openpyxl plotly
 ```
 
-E lançar a UI:
+Launch the UI:
 
 ```bash
 .venv/bin/streamlit run app.py
 ```
 
-Ou construir um **launcher .app clicável** (recomendado para uso
-diário):
+Or build a **clickable `.app` launcher** (recommended for daily use):
 
 ```bash
 bash build_app.sh
 open ~/Applications/drive-xray.app
 ```
 
-(O launcher abre automaticamente o browser em http://localhost:8501,
-com ícone bonito na Dock e Spotlight.)
+(The launcher auto-opens your browser at http://localhost:8501, with a
+real icon in the Dock and Spotlight.)
 
-### Motor Rust opcional (~10× mais rápido em drives grandes)
+### Optional Rust engine (~10× faster on large drives)
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -115,58 +117,121 @@ lipo -create -output target/universal/dx \
     target/x86_64-apple-darwin/release/dx
 ```
 
-A UI Streamlit detecta automaticamente o binário Rust quando ele
-existe — sidebar mostra `engine: 🦀 Rust` em vez de `🐍 Python`. As
-`.db` são byte-idênticas, podes alternar entre engines à vontade.
+The Streamlit UI auto-detects the Rust binary — the sidebar shows
+`engine: 🦀 Rust` instead of `🐍 Python`. The `.db` files are
+byte-identical, so you can switch engines at will.
+
+### Or via Homebrew (if available)
+
+```bash
+brew tap rbleite/tap
+brew install drive-xray
+```
+
+This installs the universal `dx` binary plus a `drive-xray-ui`
+launcher shortcut.
 
 ---
 
-## Como funciona (resumo)
+## How it works (in brief)
 
-1. **Indexação híbrida** — partial hash (head + middle + tail × 64 KB,
-   BLAKE2b 128) constante por ficheiro. Full hash (BLAKE2b 256) **só**
-   nos candidatos a duplicado. Em 30 TB poupa horas comparado com
-   "hash de tudo".
-2. **Snapshots** — cada `dx snapshot take` cria um registo imutável.
-   `dx diff #2 #5` mostra crescimento e shrink por pasta entre dois
-   pontos no tempo.
-3. **Schema v5 com path interning** — cada nome de pasta vive uma vez
-   na tabela `paths`. Em drives de 5 M ficheiros poupa ~20-25 % do
-   tamanho da `.db`.
-4. **macOS-aware** — `-x` (firmlinks), `--skip-cloud`, tratamento de
-   inodes 64-bit em exFAT/NTFS sem overflow.
+1. **Hybrid indexing** — partial hash (head + middle + tail × 64 KB,
+   BLAKE2b 128) is constant-time per file. Full hash (BLAKE2b 256) is
+   computed **only** on duplicate candidates. On 30 TB this saves
+   hours vs. "hash everything".
+2. **Snapshots** — each `dx snapshot take` creates an immutable
+   record. `dx diff #2 #5` shows growth and shrink per folder between
+   two points in time.
+3. **Schema v5 with path interning** — every directory name lives once
+   in the `paths` table. On a 1.4 M-file drive this cuts the `.db`
+   from ~1 GB down to ~650 MB.
+4. **macOS-aware** — `-x` (firmlinks), `--skip-cloud`, 64-bit inode
+   handling on exFAT/NTFS without overflow.
 
-Documentação completa: [`DOCS.md`](DOCS.md).
-Arquitectura do motor Rust: [`rust/DESIGN.md`](rust/DESIGN.md).
+Full documentation: [`DOCS.md`](DOCS.md).
+Rust engine architecture: [`rust/DESIGN.md`](rust/DESIGN.md).
+
+---
+
+## Benchmark
+
+Tested on Apple Silicon (M2 Pro), Apple SSD:
+
+| Workload | Python | Rust + mimalloc | Speedup |
+|---|---:|---:|---:|
+| 5,284 files / 750 MB | 1.45 s | 0.13 s | **11.5 ×** |
+| 2,000 files / 10 MB (50 dup groups) | 180 ms | 30 ms | **6 ×** |
+
+Real-world: 1.4 M files / 5.2 TB external drive → `.db` 648 MB,
+indexing in ~14 min on Rust.
 
 ---
 
 ## Roadmap
 
-| Estado | Componente |
+| Status | Component |
 |---|---|
-| ✅ | Hashing híbrido v2 (head+middle+tail) |
-| ✅ | Merkle hash de pastas |
+| ✅ | Hybrid v2 hashing (head + middle + tail) |
+| ✅ | Folder Merkle hash |
 | ✅ | macOS firmlinks / cloud sync filters |
-| ✅ | Schema v5 com path interning |
-| ✅ | Refresh incremental (reaproveita hashes inalterados) |
-| ✅ | Snapshots históricos + diff + prune |
+| ✅ | Schema v5 with path interning (Tier 3) |
+| ✅ | Incremental refresh (reuses unchanged hashes) |
+| ✅ | Historical snapshots + diff + prune |
 | ✅ | TreeMap (Plotly) |
-| ✅ | Cleanup assistido (script .sh com quarentena) |
-| ✅ | UI Streamlit bilingue (PT/EN) |
-| ✅ | Motor Rust (~10× mais rápido) |
-| ✅ | `.app` launcher para macOS |
-| 🔜 | Snapshots V2 — content-addressed (menos espaço para snapshots semanais) |
-| 🔜 | Detecção de APFS clones (`clonefile`) |
-| 🔜 | Cleanup v2 — execução in-place na UI |
-| 🔜 | Distribuição via Homebrew tap |
+| ✅ | Assisted cleanup (`.sh` script + quarantine) |
+| ✅ | Bilingual UI (PT/EN) |
+| ✅ | Rust engine (~10× faster) |
+| ✅ | macOS `.app` launcher |
+| ✅ | Homebrew tap |
+| 🔜 | Snapshots V2 — content-addressed (smaller history) |
+| 🔜 | APFS clone detection (`clonefile`) |
+| 🔜 | In-UI cleanup execution with quarantine |
+| 🔜 | Search query language (`*.bam >100 GB modified<2024`) |
 
 ---
 
 ## License
 
-[MIT](LICENSE) — usa, modifica, redistribui à vontade.
-Atribuição é apreciada mas não exigida.
+[Apache 2.0](LICENSE) — use, modify and redistribute freely, but the
+copyright notice and [`NOTICE`](NOTICE) file **must be preserved** in
+any derivative work. See clause 4 of the license for the exact terms.
+
+If you publish a fork or product that includes this code, please keep
+the attribution visible. That's the only thing asked in return.
+
+---
+
+## Português
+
+Esta aplicação foi pensada para quem **vive com muitas drives USB
+espalhadas pela secretária**, lida com **ficheiros gigantes de
+bioinformática** (BAMs, FASTQs, VCFs alinhados), nutre **alguma
+paixão pela fotografia** (RAWs, projetos Lightroom, edições) — e
+quer ter a **certeza do que está armazenado em cada drive** e **qual
+a redundância** entre elas.
+
+**Tipos de pergunta que isto responde:**
+
+- *"Já tenho este vídeo backuped, ou só está no SSD interno?"*
+- *"Que ficheiros novos apareceram no NAS desde a última semana?"*
+- *"O backup desta drive antiga ainda é o mesmo conteúdo, ou
+  divergiu?"*
+- *"Se eu apagar tudo na drive externa #3, perco alguma coisa que
+  não esteja noutro lado?"*
+- *"Quais são as 10 pastas que mais cresceram no projecto este
+  mês?"*
+
+**A ideia central é simples:** cada drive ganha um **"raio-x" — uma
+`.db` SQLite portátil** que sabe que ficheiros lá viviam, qual o
+tamanho, quando foram modificados, e o hash de cada um. Depois é só
+comparar. A drive pode estar desligada — o raio-x continua a
+responder.
+
+A UI Streamlit é bilingue: clica no botão **🇵🇹 PT** no topo da
+sidebar para mudar todos os textos para português. Os comandos CLI
+e mensagens técnicas mantêm-se em inglês.
+
+**Documentação técnica completa em [`DOCS.md`](DOCS.md).**
 
 ---
 
