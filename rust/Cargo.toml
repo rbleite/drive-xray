@@ -1,10 +1,11 @@
 [package]
 name = "drive-xray"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Index drives and find duplicates, snapshots, drift"
 license = "MIT OR Apache-2.0"
 rust-version = "1.75"
+repository = "https://github.com/rbleite/drive-xray"
 
 [[bin]]
 name = "dx"
@@ -48,6 +49,11 @@ csv = "1.3"
 
 # XLSX export
 rust_xlsxwriter = "0.79"
+
+# Faster allocator for multi-threaded workloads (hash phase = lots of
+# small Vec allocations). 5-15% improvement on macOS Apple Silicon in
+# our measurements; zero behavioural change.
+mimalloc = { version = "0.1", default-features = false }
 
 # OS metadata that go beyond std::fs (st_dev / st_ino / st_blocks)
 # std::os::unix::fs::MetadataExt is enough on macOS, no extra dep needed.

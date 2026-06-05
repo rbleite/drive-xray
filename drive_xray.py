@@ -38,6 +38,8 @@ READ_CHUNK = 1024 * 1024
 # v1 = head + tail; v2 = head + middle + tail (defends against bio formats like
 # BAM/VCF where header/footer are stable but body varies).
 HASH_VERSION = 2
+DX_VERSION = "1.0.0"
+SCHEMA_VERSION = 5  # see _migrate_to_v5 / SCHEMA constant below
 SKIP_DIR_NAMES = {
     ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems",
     ".DocumentRevisions-V100", ".PKInstallSandboxManager",
@@ -505,6 +507,11 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # Streamlit may issue concurrent reads while a `dx index` subprocess
+    # holds the writer. With WAL, readers don't block writers, but a
+    # second writer (e.g. cancelling and re-launching `index`) needs to
+    # wait. 5 s covers normal contention; longer locks indicate a bug.
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -1593,6 +1600,11 @@ def compare(db_a: Path, db_b: Path, min_size: int) -> None:
 
 def main():
     p = argparse.ArgumentParser(prog="drive-xray")
+    p.add_argument(
+        "--version", action="version",
+        version=f"drive-xray {DX_VERSION} "
+                f"(schema v{SCHEMA_VERSION} · hash v{HASH_VERSION})",
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pi = sub.add_parser("index", help="x-ray a drive into a sqlite db")

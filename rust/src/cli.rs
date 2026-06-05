@@ -5,8 +5,25 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// Build-time strings shown by `dx --version` (short) and `dx -V` (clap
+/// inverts these). Both include the schema and hash protocol versions
+/// so the user can tell, a year from now, why an older `.db` opens with
+/// a migration banner.
+const VERSION_SHORT: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (schema v5 · hash v2)",
+);
+const VERSION_LONG: &str = concat!(
+    env!("CARGO_PKG_VERSION"), "\n",
+    "  schema:  v5 (path interning)\n",
+    "  hash:    BLAKE2b v2 (head + middle + tail)\n",
+    "  repo:    ", env!("CARGO_PKG_REPOSITORY"), "\n",
+);
+
 #[derive(Parser, Debug)]
-#[command(name = "dx", version, about = "drive-xray: index + dedupe + snapshots")]
+#[command(name = "dx", about = "drive-xray: index + dedupe + snapshots",
+          version = VERSION_SHORT,
+          long_version = VERSION_LONG)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,

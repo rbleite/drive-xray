@@ -102,6 +102,10 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // Wait up to 5 s if another writer holds the lock (e.g. Streamlit
+    // poking the same db during an `index` subprocess). WAL keeps reads
+    // non-blocking; this only matters for two concurrent writers.
+    conn.pragma_update(None, "busy_timeout", 5000)?;
 
     Ok(conn)
 }
