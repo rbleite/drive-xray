@@ -1,0 +1,69 @@
+[package]
+name = "drive-xray"
+version = "0.1.0"
+edition = "2021"
+description = "Index drives and find duplicates, snapshots, drift"
+license = "MIT OR Apache-2.0"
+rust-version = "1.75"
+
+[[bin]]
+name = "dx"
+path = "src/main.rs"
+
+[lib]
+name = "drive_xray"
+path = "src/lib.rs"
+
+[dependencies]
+# SQLite with bundled lib so we don't depend on system version
+rusqlite = { version = "0.32", features = ["bundled", "blob"] }
+
+# BLAKE2b that matches Python hashlib byte-for-byte (incl. digest_size=16/32)
+blake2b_simd = "1.0"
+
+# Parallel directory traversal
+jwalk = "0.8"
+
+# Thread pool / par_iter
+rayon = "1.10"
+
+# CLI parsing with derive macros
+clap = { version = "4.5", features = ["derive"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Stderr progress + spinners (matches the Python `691309 files 264.45 GB (2646/s)` style)
+indicatif = "0.17"
+
+# Timestamps in the same ISO format as Python's time.strftime("%Y-%m-%dT%H:%M:%S")
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# Lossless hex for the dedupe / diff CLI prints
+hex = "0.4"
+
+# CSV export
+csv = "1.3"
+
+# XLSX export
+rust_xlsxwriter = "0.79"
+
+# OS metadata that go beyond std::fs (st_dev / st_ino / st_blocks)
+# std::os::unix::fs::MetadataExt is enough on macOS, no extra dep needed.
+
+[profile.release]
+# Optimize for binary size — these are large drive ops so codegen matters
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.bench]
+inherits = "release"
+
+[dev-dependencies]
+# Comparing against Python implementation in parity tests
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
