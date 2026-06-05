@@ -1,0 +1,82 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Cancel earlier runs on the same ref — the most recent push wins.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: cargo test (rust ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # We support both Apple Silicon and Intel via the universal binary.
+        # macos-14 = arm64, macos-13 = x86_64.
+        os: [macos-14, macos-13]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: build (release)
+        working-directory: rust
+        run: cargo build --release --locked
+
+      - name: unit + integration tests
+        working-directory: rust
+        # Excludes the parity job's tests/parity.rs which require Python.
+        # Those run in the `parity` job below.
+        run: cargo test --release --workspace
+                    -- --skip rust_and_python_produce_equivalent_index
+                       --skip rust_db_opens_in_python_dedupe
+                       --skip python_db_opens_in_rust_dedupe
+
+      - name: dx --version sanity
+        run: ./rust/target/release/dx --version
+
+  parity:
+    name: parity Python ↔ Rust
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          # Different key so we don't trash the rust job's cache.
+          prefix-key: "parity"
+
+      - name: create venv with streamlit deps
+        # tests/parity.rs auto-skips when .venv/bin/python isn't there; we
+        # populate it so the suite actually runs in CI.
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install streamlit openpyxl plotly
+
+      - name: cargo test (parity only)
+        working-directory: rust
+        run: cargo test --release --test parity

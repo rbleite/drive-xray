@@ -23,7 +23,9 @@ of the same size, and ~constant time regardless of file size.
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
+import json
 import os
 import sqlite3
 import stat
@@ -490,6 +492,65 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> bool:
     print(f"    interned {n} entries in {time.time()-t0:.1f}s",
           file=sys.stderr)
     return True
+
+
+# ---------- central registry ----------
+
+REGISTRY_PATH = Path.home() / ".config" / "drive-xray" / "registry.json"
+
+
+def _registry_load() -> dict:
+    if REGISTRY_PATH.exists():
+        try:
+            return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"version": 1, "drives": {}}
+
+
+def _registry_save(data: dict) -> None:
+    REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    REGISTRY_PATH.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def registry_register(db_path: Path, label: str, root: Path) -> None:
+    """Record a drive db in the central registry."""
+    data = _registry_load()
+    data["drives"][str(db_path.resolve())] = {
+        "label": label,
+        "root": str(root),
+        "last_indexed": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+    _registry_save(data)
+
+
+def registry_list() -> list[dict]:
+    """Return all registered drives (sorted by label). Each dict has:
+    db (Path), label, root, last_indexed, exists (bool)."""
+    data = _registry_load()
+    result = []
+    for db_str, meta in data.get("drives", {}).items():
+        db = Path(db_str)
+        result.append({
+            "db": db,
+            "label": meta.get("label", db.stem),
+            "root": meta.get("root", ""),
+            "last_indexed": meta.get("last_indexed", ""),
+            "exists": db.exists(),
+        })
+    result.sort(key=lambda x: x["label"].lower())
+    return result
+
+
+def registry_remove(db_path: Path) -> None:
+    """Remove a drive from the registry (called on delete)."""
+    data = _registry_load()
+    key = str(db_path.resolve())
+    if key in data.get("drives", {}):
+        del data["drives"][key]
+        _registry_save(data)
 
 
 def open_db(db_path: Path) -> sqlite3.Connection:
@@ -1695,6 +1756,8 @@ def main():
     pe.add_argument("--format", choices=("csv", "xlsx"),
                     help="override format (default: inferred from extension)")
 
+    sub.add_parser("drives", help="list all drives registered in the central index")
+
     args = p.parse_args()
 
     if args.cmd == "index":
@@ -1708,6 +1771,7 @@ def main():
         print(f"indexing {args.root} → {db}{suffix}", file=sys.stderr)
         index_drive(args.root, db, label, args.full,
                     one_fs=args.one_filesystem, skip_cloud=args.skip_cloud)
+        registry_register(db, label, args.root)
     elif args.cmd == "dedupe":
         dedupe(args.db, args.min_size, args.mode)
     elif args.cmd == "compare":
@@ -1715,6 +1779,12 @@ def main():
     elif args.cmd == "refresh":
         print(f"refreshing {args.db}", file=sys.stderr)
         refresh_drive(args.db, do_full=args.full)
+        # update last_indexed in registry (read label/root from db)
+        _drv = open_db(args.db).execute(
+            "SELECT label, root_path FROM drive LIMIT 1"
+        ).fetchone()
+        if _drv:
+            registry_register(args.db, _drv[0], Path(_drv[1]))
     elif args.cmd == "snapshot":
         # support both "dx snapshot <db>" and "dx snapshot take <db>"
         snap_cmd = getattr(args, "snap_cmd", None) or "take"
@@ -1768,6 +1838,19 @@ def main():
         if fmt not in ("csv", "xlsx"):
             sys.exit(f"cannot infer format from extension {args.out.suffix!r}; use --format")
         export_duplicates(args.db, args.out, fmt, args.min_size)
+    elif args.cmd == "drives":
+        entries = registry_list()
+        if not entries:
+            print("  no drives registered yet — run `dx index` to add one")
+        else:
+            print(f"  {'LABEL':<20}  {'LAST INDEXED':<20}  {'ROOT':<40}  DB")
+            print(f"  {'-'*20}  {'-'*20}  {'-'*40}  {'-'*30}")
+            for e in entries:
+                status = "" if e["exists"] else " [MISSING]"
+                print(
+                    f"  {e['label']:<20}  {e['last_indexed']:<20}"
+                    f"  {e['root']:<40}  {e['db']}{status}"
+                )
 
 
 if __name__ == "__main__":

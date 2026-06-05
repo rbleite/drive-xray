@@ -24,6 +24,7 @@ from drive_xray import (
     compute_folder_sizes, generate_cleanup_script,
     CLEANUP_STRATEGIES, CLEANUP_ACTIONS,
     latest_snapshot_id, list_snapshots, diff_snapshots,
+    registry_list, registry_remove, registry_register,
 )
 
 DB_DIR = Path.home() / "tools" / "drive-xray"
@@ -365,7 +366,14 @@ def start_snapshot(db: Path) -> None:
 # ---------- db helpers ----------
 
 def list_dbs() -> list[Path]:
-    return sorted(DB_DIR.glob("*.db"))
+    """Return all known .db files: local DB_DIR + anything in the registry."""
+    known: dict[Path, None] = {}
+    for p in sorted(DB_DIR.glob("*.db")):
+        known[p.resolve()] = None
+    for entry in registry_list():
+        if entry["exists"]:
+            known[entry["db"].resolve()] = None
+    return sorted(known.keys())
 
 
 def drive_info(db: Path) -> dict | None:
@@ -591,7 +599,8 @@ def build_xlsx(rows: list[dict]) -> bytes:
 
 
 def delete_db_files(target: Path) -> None:
-    """Remove the .db plus any -wal/-shm/-journal sidecars."""
+    """Remove the .db plus any -wal/-shm/-journal sidecars, and deregister."""
+    registry_remove(target)
     target.unlink(missing_ok=True)
     for ext in ("-wal", "-shm", "-journal"):
         sib = Path(str(target) + ext)

@@ -1,0 +1,135 @@
+name: release
+
+# Triggered automatically when a v*.*.* tag is pushed:
+#     git tag -a v1.1.0 -m "v1.1.0"
+#     git push origin v1.1.0
+#
+# Builds the universal macOS binary (arm64 + x86_64 via lipo), tarballs
+# it, computes sha256, and publishes a GitHub Release with both assets.
+# Release notes are auto-generated from commits since the previous tag.
+#
+# The published tarball is what the Homebrew tap formula downloads, so
+# the SHA-256 below has to be updated in
+#     https://github.com/rbleite/homebrew-tap/blob/main/Formula/drive-xray.rb
+# after each release (see release notes printed by this workflow).
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # required by softprops/action-gh-release to publish
+
+jobs:
+  build-and-release:
+    name: build universal + publish
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: build aarch64
+        working-directory: rust
+        run: cargo build --release --locked --target aarch64-apple-darwin
+
+      - name: build x86_64
+        working-directory: rust
+        run: cargo build --release --locked --target x86_64-apple-darwin
+
+      - name: lipo into universal binary
+        working-directory: rust
+        run: |
+          mkdir -p target/universal
+          lipo -create -output target/universal/dx \
+              target/aarch64-apple-darwin/release/dx \
+              target/x86_64-apple-darwin/release/dx
+          file target/universal/dx
+          ls -lh target/universal/dx
+
+      - name: compute version + names
+        id: vars
+        run: |
+          # GITHUB_REF_NAME is "v1.1.0" — strip the leading "v".
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAME="dx-${VERSION}-darwin-universal"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "  version: $VERSION"
+          echo "  name:    $NAME"
+
+      - name: tarball + sha256
+        run: |
+          NAME="${{ steps.vars.outputs.name }}"
+          (cd rust/target/universal && tar -czf "../../../${NAME}.tar.gz" dx)
+          shasum -a 256 "${NAME}.tar.gz" | awk '{print $1}' > "${NAME}.tar.gz.sha256"
+          echo "=== artifacts ==="
+          ls -lh "${NAME}.tar.gz" "${NAME}.tar.gz.sha256"
+          echo "=== sha256 ==="
+          cat "${NAME}.tar.gz.sha256"
+
+      - name: publish github release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "${{ github.ref_name }} — universal macOS binary"
+          generate_release_notes: true
+          files: |
+            ${{ steps.vars.outputs.name }}.tar.gz
+            ${{ steps.vars.outputs.name }}.tar.gz.sha256
+          body: |
+            ## Install via Homebrew
+
+            ```bash
+            brew tap rbleite/tap
+            brew install drive-xray
+            ```
+
+            ## Install manually
+
+            ```bash
+            curl -L -o dx.tar.gz \
+              https://github.com/rbleite/drive-xray/releases/download/${{ github.ref_name }}/${{ steps.vars.outputs.name }}.tar.gz
+            tar -xzf dx.tar.gz
+            ./dx --version
+            ```
+
+            ## What's in the tarball
+
+            Universal Mach-O binary (arm64 + x86_64) for macOS 11+. Runs
+            natively on Apple Silicon **and** Intel Macs without Rosetta.
+
+            ## For maintainers
+
+            After this release is published, update the Homebrew formula
+            with the new URL + SHA-256 from the asset list. The SHA is
+            in `${{ steps.vars.outputs.name }}.tar.gz.sha256`.
+
+            ---
+
+            *Auto-generated release notes below from commits since the
+            previous tag.*
+
+      - name: print homebrew formula update hint
+        run: |
+          NAME="${{ steps.vars.outputs.name }}"
+          SHA=$(cat "${NAME}.tar.gz.sha256")
+          cat <<HINT
+
+          ────────────────────────────────────────────────────────────
+          Update rbleite/homebrew-tap/Formula/drive-xray.rb with:
+
+            url    "https://github.com/rbleite/drive-xray/releases/download/${GITHUB_REF_NAME}/${NAME}.tar.gz"
+            sha256 "${SHA}"
+            version "${{ steps.vars.outputs.version }}"
+          ────────────────────────────────────────────────────────────
+          HINT

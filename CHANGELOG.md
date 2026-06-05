@@ -1,0 +1,105 @@
+# Changelog
+
+All notable changes to drive-xray are documented here.
+
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+- GitHub Actions: `tests` workflow runs `cargo test` on macos-13 (Intel)
+  and macos-14 (Apple Silicon) on every push and PR, plus a separate
+  `parity` job that sets up a Python venv to run the cross-implementation
+  parity tests.
+- GitHub Actions: `release` workflow auto-builds the universal binary
+  (`lipo` of arm64 + x86_64), tarballs it, computes SHA-256, and
+  publishes a GitHub Release on any `v*.*.*` tag push.
+- `CONTRIBUTING.md` with bug-report template and dev setup instructions.
+
+## [1.0.0] — 2026-06-05
+
+First public release. The full feature set is documented in
+[README.md](README.md); this section lists what landed in v1.0 organized
+by category.
+
+### Added — core engine
+- Python implementation (`drive_xray.py`) with full CLI surface.
+- Optional Rust implementation (`rust/`) as a drop-in CLI replacement,
+  ~10× faster on `index` and ~6× faster on `dedupe`. `.db` files are
+  byte-for-byte identical between engines (verified by parity tests).
+- BLAKE2b hashing with two-stage strategy: partial hash (head + middle +
+  tail × 64 KB, 16 bytes) for fast collision filtering, full hash
+  (32 bytes) computed only on size+partial matches.
+- Folder Merkle hash for detecting identical directory subtrees.
+- Schema v5 with **path interning** (a.k.a. Tier 3): every directory
+  name lives once in a `paths` table, referenced by `entries.path_id`.
+  Cuts ~20–25% off `.db` size on large drives.
+- Idempotent migrations from v1/v2/v3/v4 schemas; old `.db` files open
+  transparently and migrate forward on first read.
+
+### Added — features
+- Snapshots: `dx snapshot take`, `list`, `prune`, `diff`. Default
+  retention: keep last 10 + 12 monthly.
+- `dx refresh` (overwrites latest snapshot in place) and `dx compact`
+  (`VACUUM` + `wal_checkpoint`).
+- Cross-drive comparison: `dx compare a.db b.db` works offline (neither
+  drive needs to be mounted).
+- Export: CSV via stdlib `csv`, XLSX via `openpyxl` (Python) /
+  `rust_xlsxwriter` (Rust).
+- Assisted cleanup: `dx cleanup` generates a shell script you review
+  before running. Four keep-strategies (shortest, oldest, newest,
+  alphabetical) and two actions (quarantine to
+  `~/.drive-xray-quarantine/`, or `rm`). Never deletes on its own.
+- Hardlink awareness everywhere: hardlinks count as one physical file
+  for "wasted space" math, and dedupe output tags them explicitly.
+
+### Added — UI
+- Streamlit UI (`app.py`) with PT/EN bilingual surface and tabs for
+  Summary, Duplicates, TreeMap (Plotly), History (snapshot diff), and
+  Compare across drives.
+- Auto-detects the Rust binary when present; sidebar shows
+  `engine: 🦀 Rust` or `engine: 🐍 Python`.
+- macOS `.app` launcher via `build_app.sh`. Multi-resolution `.icns`
+  built from `assets/icon.png` via `iconutil`.
+
+### Added — macOS niceties
+- `--one-filesystem` / `-x` doesn't traverse APFS firmlinks, preventing
+  double-counting between `/` and `/System/Volumes/Data`.
+- `--skip-cloud` skips iCloud Drive, OneDrive (including
+  `OneDrive - <tenant>`), Google Drive, Dropbox, Box, MEGA, Tresorit,
+  pCloud, Proton Drive, and the whole `~/Library/CloudStorage/` hub.
+- u64 → i64 wrap for inodes/device IDs (exFAT, NTFS, and some APFS
+  volumes report values >2⁶³−1 that would otherwise overflow
+  SQLite INTEGER).
+
+### Added — quality
+- 32 tests green across four buckets:
+  - 17 lib unit tests (hash, walker, util, snapshot prune)
+  - 6 db_parity tests (schema migrations, mtime IEEE 754, idempotence)
+  - 3 parity tests (Python ↔ Rust byte-exact)
+  - 5 snapshot_flow tests (take, list, prune, diff)
+  - 1 full_cycle test (every CLI subcommand in user order)
+- `PRAGMA busy_timeout=5000` on every connection to avoid spurious
+  `database is locked` errors when the UI and a CLI subprocess race.
+- `mimalloc` as the global allocator in the Rust binary.
+
+### Added — distribution
+- Universal Mach-O binary (arm64 + x86_64) at 3.9 MB.
+- Homebrew tap at https://github.com/rbleite/homebrew-tap
+  (`brew tap rbleite/tap && brew install drive-xray`).
+- Apache-2.0 license + `NOTICE` file listing every third-party
+  dependency, ensuring the attribution chain stays intact in any
+  derivative work.
+
+### Engine performance benchmark
+On Apple Silicon (M2 Pro), Apple SSD:
+
+| Workload | Python | Rust + mimalloc | Speedup |
+|---|---:|---:|---:|
+| 5,284 files / 750 MB | 1.45 s | 0.13 s | **11.5×** |
+| 2,000 files / 10 MB (50 dup groups) | 180 ms | 30 ms | **6×** |
+| 1.4 M files / 5.2 TB external (real) | ~hours | ~14 min | — |
+
+[Unreleased]: https://github.com/rbleite/drive-xray/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/rbleite/drive-xray/releases/tag/v1.0.0
