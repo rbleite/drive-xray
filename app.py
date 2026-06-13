@@ -27,7 +27,8 @@ from drive_xray import (
     CLEANUP_STRATEGIES, CLEANUP_ACTIONS,
     latest_snapshot_id, list_snapshots, diff_snapshots,
     registry_list, registry_remove, registry_register,
-    cross_dedupe, verify_file, execute_file_action, QUARANTINE_DIR,
+    cross_dedupe, read_drive_index_opts,
+    verify_file, execute_file_action, QUARANTINE_DIR,
 )
 
 DB_DIR = Path.home() / "tools" / "drive-xray"
@@ -143,6 +144,8 @@ TRANSLATIONS = {
         "cross_col_size": "tamanho",
         "cross_col_match": "match",
         "cross_need_drives": "Precisa de pelo menos 2 drives indexadas.",
+        "cross_firmlink_warn": "ℹ️ **{drives}** — têm múltiplas cópias internas do mesmo conteúdo (backups ou cópias manuais). Os grupos marcados com ⚠️ incluem essas cópias.",
+        "cross_firmlink_groups": "Grupos com cópias internas duplicadas na mesma drive:",
         "cross_matrix_title": "📊 Sobreposição entre drives",
         "cross_matrix_caption": "GB partilhados entre cada par de drives. Quanto mais escuro, mais duplicados.",
         "cross_download_csv": "⬇️ Exportar CSV (todos os grupos)",
@@ -306,6 +309,8 @@ TRANSLATIONS = {
         "cross_col_size": "size",
         "cross_col_match": "match",
         "cross_need_drives": "Need at least 2 indexed drives.",
+        "cross_firmlink_warn": "ℹ️ **{drives}** — have multiple internal copies of the same content (backups or manual copies). Groups marked ⚠️ include these copies.",
+        "cross_firmlink_groups": "Groups with internal duplicate copies on the same drive:",
         "cross_matrix_title": "📊 Drive overlap",
         "cross_matrix_caption": "Shared GB between each pair of drives. Darker = more duplicates.",
         "cross_download_csv": "⬇️ Export CSV (all groups)",
@@ -1407,6 +1412,27 @@ with tab_compare:
                 xc3.metric(t("cross_confirmed"), f"{_confirmed:,}")
                 xc4.metric(t("cross_approx"), f"{_approx:,}")
 
+                # ── firmlink / no-one-fs warning ─────────────────────────────
+                _intra_drives: set[str] = set()
+                _intra_groups: list[int] = []
+                for _gi2, _g2 in enumerate(_xgroups, 1):
+                    if _g2.get("intra_drives"):
+                        _intra_drives.update(_g2["intra_drives"])
+                        _intra_groups.append(_gi2)
+
+                _no_x_drives: set[str] = {
+                    lbl for lbl, opts in read_drive_index_opts(db_labels).items()
+                    if not opts.get("one_fs")
+                }
+                _suspect = _intra_drives | _no_x_drives
+                if _suspect:
+                    st.info(t("cross_firmlink_warn",
+                               drives=", ".join(f"**{d}**" for d in sorted(_suspect))))
+                    if _intra_groups:
+                        with st.expander(t("cross_firmlink_groups"), expanded=False):
+                            st.write(f"Grupos: {_intra_groups[:50]}"
+                                     + (f" … +{len(_intra_groups)-50}" if len(_intra_groups) > 50 else ""))
+
                 # ── N×N heatmap ──────────────────────────────────────────────
                 st.subheader(t("cross_matrix_title"))
                 st.caption(t("cross_matrix_caption"))
@@ -1476,16 +1502,21 @@ with tab_compare:
                 _rows = []
                 for _i, _g in enumerate(_xgroups, 1):
                     _tag = "=" if _g["confirmed"] else "≈"
+                    _has_intra = bool(_g.get("intra_drives"))
+                    _intra_set = set(_g.get("intra_drives", []))
                     for _c in _g["copies"]:
+                        _drive_label = (_c["drive"] + " ⚠️"
+                                        if _c["drive"] in _intra_set else _c["drive"])
+                        _match_tag = _tag + (" ⚠️" if _has_intra else "")
                         _row = {
                             t("cross_col_group"): _i,
-                            t("cross_col_match"): _tag,
+                            t("cross_col_match"): _match_tag,
                             t("cross_col_size"): human(_g["size"]),
-                            t("cross_col_drive"): _c["drive"],
+                            t("cross_col_drive"): _drive_label,
                             t("cross_col_path"): _c["path"],
                         }
                         _rows.append(_row)
-                        _csv_w.writerow([_i, _tag, _g["size"],
+                        _csv_w.writerow([_i, _match_tag, _g["size"],
                                          human(_g["size"]),
                                          _c["drive"], _c["path"]])
 

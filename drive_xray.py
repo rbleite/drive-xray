@@ -771,6 +771,16 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
     cur = conn.cursor()
 
     root_dev = root.stat().st_dev if one_fs else None
+    # Track visited directory (inode, device) pairs to detect APFS firmlinks.
+    # macOS firmlinks expose the same directory tree under two paths
+    # (e.g. /Users/… and /System/Volumes/Data/Users/…) with identical
+    # st_dev, so --one-filesystem cannot stop the double-count. Tracking
+    # inodes catches this regardless of whether -x is active.
+    _root_stat = root.stat()
+    _visited_dir_inodes: set[tuple[int, int]] = {
+        (_root_stat.st_ino, _root_stat.st_dev)
+    }
+    firmlinks_skipped = 0
     crossed = 0   # count of pruned subtrees on other filesystems
     cloud_skipped = 0  # count of pruned cloud-sync subtrees
     reused = 0    # files whose hashes were carried over from reuse_old
@@ -815,7 +825,7 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
             dirnames[:] = [d for d in dirnames if not is_cloud_dir(d)]
             cloud_skipped += before - len(dirnames)
         dp = Path(dirpath)
-        # prune entries on other filesystems (mount points, firmlinks)
+        # prune entries on other filesystems (mount points)
         if one_fs:
             kept = []
             for d in dirnames:
@@ -827,6 +837,22 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
                 except OSError:
                     pass
             dirnames[:] = kept
+        # prune APFS firmlinks: skip any subdir whose (inode, device) was
+        # already visited — these are the same physical directory reachable
+        # via two paths (e.g. /Users and /System/Volumes/Data/Users).
+        kept2 = []
+        for d in dirnames:
+            try:
+                _dstat = (dp / d).lstat()
+                _dkey = (_dstat.st_ino, _dstat.st_dev)
+                if _dkey in _visited_dir_inodes:
+                    firmlinks_skipped += 1
+                else:
+                    _visited_dir_inodes.add(_dkey)
+                    kept2.append(d)
+            except OSError:
+                kept2.append(d)
+        dirnames[:] = kept2
         rel_dir = str(dp.relative_to(root)) if dp != root else "."
         parent_id = parent_id_by_rel.get(rel_dir)
 
@@ -912,6 +938,8 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
     extras = []
     if one_fs:
         extras.append(f"pruned {crossed} cross-fs subtrees")
+    if firmlinks_skipped:
+        extras.append(f"skipped {firmlinks_skipped} firmlink subtrees")
     if skip_cloud:
         extras.append(f"skipped {cloud_skipped} cloud subtrees")
     if reuse_old is not None:
@@ -1736,11 +1764,21 @@ def cross_dedupe(
         if sid is None:
             conn.close()
             continue
-        for size, partial, rel, fh in conn.execute(
-            "SELECT size, partial_hash, rel_path, full_hash FROM entries"
+        # deduplicate by (inode, device) within the same db so APFS firmlinks
+        # (e.g. /Users/… == /System/Volumes/Data/Users/…, same inode+dev)
+        # don't create false cross-drive duplicates.
+        _seen_inodes: set[tuple[int, int]] = set()
+        for size, partial, rel, fh, ino, dev in conn.execute(
+            "SELECT size, partial_hash, rel_path, full_hash, inode, device"
+            " FROM entries"
             " WHERE snapshot_id=? AND is_dir=0 AND size>=? AND partial_hash IS NOT NULL",
             (sid, min_size),
         ):
+            if ino is not None and dev is not None:
+                key = (int(ino), int(dev))
+                if key in _seen_inodes:
+                    continue
+                _seen_inodes.add(key)
             index[(size, partial)].append((rel, fh, label))
         conn.close()
 
@@ -1759,22 +1797,52 @@ def cross_dedupe(
             for sub in by_fh.values():
                 if len({c["drive"] for c in sub}) < 2:
                     continue
+                _drive_counts: dict[str, int] = {}
+                for _c in sub:
+                    _drive_counts[_c["drive"]] = _drive_counts.get(_c["drive"], 0) + 1
                 groups.append({
                     "size": size,
                     "confirmed": True,
                     "wasted_bytes": size * (len(sub) - 1),
                     "copies": sub,
+                    # drives that appear >1× in same group → likely firmlink
+                    "intra_drives": [d for d, n in _drive_counts.items() if n > 1],
                 })
         else:
+            _drive_counts2: dict[str, int] = {}
+            for _c in copies:
+                _drive_counts2[_c[2]] = _drive_counts2.get(_c[2], 0) + 1
             groups.append({
                 "size": size,
                 "confirmed": False,
                 "wasted_bytes": size * (len(copies) - 1),
                 "copies": [{"drive": c[2], "path": c[0]} for c in copies],
+                "intra_drives": [d for d, n in _drive_counts2.items() if n > 1],
             })
 
     groups.sort(key=lambda g: -g["wasted_bytes"])
     return groups
+
+
+def read_drive_index_opts(db_labels: list[tuple[Path, str]]) -> dict[str, dict]:
+    """Return {label: {"one_fs": bool, "skip_cloud": bool}} from each db's
+    drive table. Drives that can't be read are omitted."""
+    result: dict[str, dict] = {}
+    for db_path, label in db_labels:
+        try:
+            conn = open_db(db_path)
+            row = conn.execute(
+                "SELECT opt_one_fs, opt_skip_cloud FROM drive LIMIT 1"
+            ).fetchone()
+            conn.close()
+            if row:
+                result[label] = {
+                    "one_fs": bool(row[0]),
+                    "skip_cloud": bool(row[1]),
+                }
+        except Exception:
+            pass
+    return result
 
 
 # ---------- cli ----------
