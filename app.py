@@ -141,6 +141,10 @@ TRANSLATIONS = {
         "cross_col_size": "tamanho",
         "cross_col_match": "match",
         "cross_need_drives": "Precisa de pelo menos 2 drives indexadas.",
+        "cross_matrix_title": "📊 Sobreposição entre drives",
+        "cross_matrix_caption": "GB partilhados entre cada par de drives. Quanto mais escuro, mais duplicados.",
+        "cross_download_csv": "⬇️ Exportar CSV (todos os grupos)",
+        "cross_details": "📋 Detalhes (top 500 grupos)",
         "compare_with": "Comparar com",
         "minimum_mb": "Mínimo (MB)",
         "compare_button": "Comparar",
@@ -281,6 +285,10 @@ TRANSLATIONS = {
         "cross_col_size": "size",
         "cross_col_match": "match",
         "cross_need_drives": "Need at least 2 indexed drives.",
+        "cross_matrix_title": "📊 Drive overlap",
+        "cross_matrix_caption": "Shared GB between each pair of drives. Darker = more duplicates.",
+        "cross_download_csv": "⬇️ Export CSV (all groups)",
+        "cross_details": "📋 Details (top 500 groups)",
         "compare_with": "Compare with",
         "minimum_mb": "Minimum (MB)",
         "compare_button": "Compare",
@@ -1173,6 +1181,7 @@ with tab_compare:
             if not _xgroups:
                 st.info(t("cross_no_results"))
             else:
+                # ── metrics ─────────────────────────────────────────────────
                 _total_wasted = sum(g["wasted_bytes"] for g in _xgroups)
                 _confirmed = sum(1 for g in _xgroups if g["confirmed"])
                 _approx = len(_xgroups) - _confirmed
@@ -1182,21 +1191,97 @@ with tab_compare:
                 xc3.metric(t("cross_confirmed"), f"{_confirmed:,}")
                 xc4.metric(t("cross_approx"), f"{_approx:,}")
 
-                # flatten to rows: one row per copy
+                # ── N×N heatmap ──────────────────────────────────────────────
+                st.subheader(t("cross_matrix_title"))
+                st.caption(t("cross_matrix_caption"))
+
+                # collect unique drive labels that appear in results
+                _drive_set: set[str] = set()
+                for _g in _xgroups:
+                    for _c in _g["copies"]:
+                        _drive_set.add(_c["drive"])
+                _drive_order = sorted(_drive_set)
+                _didx = {d: i for i, d in enumerate(_drive_order)}
+                _n = len(_drive_order)
+
+                # build symmetric matrix (bytes)
+                _mat = [[0.0] * _n for _ in range(_n)]
+                for _g in _xgroups:
+                    _ud = list({_c["drive"] for _c in _g["copies"]})
+                    for _i in range(len(_ud)):
+                        for _j in range(_i + 1, len(_ud)):
+                            _di, _dj = _didx[_ud[_i]], _didx[_ud[_j]]
+                            _mat[_di][_dj] += _g["size"]
+                            _mat[_dj][_di] += _g["size"]
+
+                # convert to GB, mask diagonal as None (shows as grey)
+                _mat_gb = [
+                    [None if _i == _j else _mat[_i][_j] / 1e9
+                     for _j in range(_n)]
+                    for _i in range(_n)
+                ]
+                _text = [
+                    ["" if _i == _j
+                     else (f"{_mat[_i][_j]/1e9:.1f} GB"
+                           if _mat[_i][_j] > 0 else "0")
+                     for _j in range(_n)]
+                    for _i in range(_n)
+                ]
+
+                import plotly.graph_objects as go
+                _fig = go.Figure(go.Heatmap(
+                    z=_mat_gb,
+                    x=_drive_order,
+                    y=_drive_order,
+                    colorscale="Blues",
+                    showscale=True,
+                    colorbar=dict(title="GB"),
+                    text=_text,
+                    texttemplate="%{text}",
+                    hovertemplate=(
+                        "%{y} ↔ %{x}<br>%{text}<extra></extra>"
+                    ),
+                ))
+                _fig.update_layout(
+                    height=max(300, 80 * _n),
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    xaxis=dict(side="bottom"),
+                )
+                st.plotly_chart(_fig, use_container_width=True)
+
+                # ── flat table + CSV download ─────────────────────────────────
+                st.subheader(t("cross_details"))
+
+                import csv, io as _io
+                _csv_buf = _io.StringIO()
+                _csv_w = csv.writer(_csv_buf)
+                _csv_w.writerow(["group", "match", "size_bytes", "size_human",
+                                 "drive", "path"])
                 _rows = []
-                for i, g in enumerate(_xgroups[:500], 1):
-                    _tag = "=" if g["confirmed"] else "≈"
-                    for c in g["copies"]:
-                        _rows.append({
-                            t("cross_col_group"): i,
+                for _i, _g in enumerate(_xgroups, 1):
+                    _tag = "=" if _g["confirmed"] else "≈"
+                    for _c in _g["copies"]:
+                        _row = {
+                            t("cross_col_group"): _i,
                             t("cross_col_match"): _tag,
-                            t("cross_col_size"): human(g["size"]),
-                            t("cross_col_drive"): c["drive"],
-                            t("cross_col_path"): c["path"],
-                            "_bytes": g["size"],
-                        })
+                            t("cross_col_size"): human(_g["size"]),
+                            t("cross_col_drive"): _c["drive"],
+                            t("cross_col_path"): _c["path"],
+                        }
+                        _rows.append(_row)
+                        _csv_w.writerow([_i, _tag, _g["size"],
+                                         human(_g["size"]),
+                                         _c["drive"], _c["path"]])
+
+                st.download_button(
+                    t("cross_download_csv"),
+                    data=_csv_buf.getvalue().encode(),
+                    file_name="cross-dedupe.csv",
+                    mime="text/csv",
+                    key="xdp_csv",
+                )
                 st.dataframe(
-                    [{k: v for k, v in r.items() if k != "_bytes"} for r in _rows],
+                    _rows[:500 * 10],  # rows are per-copy, groups×copies
                     use_container_width=True,
                     hide_index=True,
                 )
