@@ -531,25 +531,76 @@ def drive_info(db: Path) -> dict | None:
     return d
 
 
-def treemap_rows(db: Path, min_size: int, include_files: bool = False) -> list[dict]:
-    """Build rows for a plotly treemap. Only folders ≥ min_size are kept;
-    their ancestors are added to keep the tree connected. Each row has
-    id / parent / name / size / kind."""
+def _treemap_precompute(db: Path):
+    """Fetch dirs + direct-file-size sums; propagate sizes bottom-up.
+    Returns (by_id, sizes) using only ~133k + 101k rows instead of 4M."""
     conn = open_db(db)
     sid = latest_snapshot_id(conn)
     if sid is None:
         conn.close()
-        return []
-    raw = list(conn.execute(
-        "SELECT id, rel_path, parent_id, is_dir, size FROM entries"
-        " WHERE snapshot_id=?",
-        (sid,),
-    ))
+        return {}, {}
+    dirs = conn.execute(
+        "SELECT id, rel_path, parent_id, size FROM entries"
+        " WHERE snapshot_id=? AND is_dir=1", (sid,),
+    ).fetchall()
+    file_sums_rows = conn.execute(
+        "SELECT parent_id, SUM(size) FROM entries"
+        " WHERE snapshot_id=? AND is_dir=0 GROUP BY parent_id", (sid,),
+    ).fetchall()
     conn.close()
-    if not raw:
-        return []
-    sizes = compute_folder_sizes([(e[0], e[2], e[3], e[4]) for e in raw])
-    by_id = {e[0]: e for e in raw}
+
+    file_sums = {row[0]: row[1] or 0 for row in file_sums_rows}
+    by_id = {eid: (eid, rp, pid, True, sz) for eid, rp, pid, sz in dirs}
+
+    children: dict[int, list[int]] = defaultdict(list)
+    roots: list[int] = []
+    for eid, _, pid, _ in dirs:
+        if pid is None:
+            roots.append(eid)
+        else:
+            children[pid].append(eid)
+
+    sizes: dict[int, int] = {eid: file_sums.get(eid, 0) for eid, _, _, _ in dirs}
+    for root in roots:
+        stack: list[tuple[int, bool]] = [(root, False)]
+        while stack:
+            nid, visited = stack.pop()
+            if visited:
+                for c in children[nid]:
+                    sizes[nid] = sizes.get(nid, 0) + sizes.get(c, 0)
+            else:
+                stack.append((nid, True))
+                for c in children[nid]:
+                    stack.append((c, False))
+    return by_id, sizes
+
+
+def treemap_rows(db: Path, min_size: int, include_files: bool = False,
+                 _precomputed=None) -> list[dict]:
+    """Build rows for a plotly treemap. Only folders ≥ min_size are kept;
+    their ancestors are added to keep the tree connected. Each row has
+    id / parent / name / size / kind.
+
+    Pass _precomputed=(by_id, sizes) to skip the expensive DB query."""
+    if _precomputed is not None:
+        by_id, sizes = _precomputed
+        raw = list(by_id.values())
+    else:
+        conn = open_db(db)
+        sid = latest_snapshot_id(conn)
+        if sid is None:
+            conn.close()
+            return []
+        raw = list(conn.execute(
+            "SELECT id, rel_path, parent_id, is_dir, size FROM entries"
+            " WHERE snapshot_id=?",
+            (sid,),
+        ))
+        conn.close()
+        if not raw:
+            return []
+        sizes = compute_folder_sizes([(e[0], e[2], e[3], e[4]) for e in raw])
+        by_id = {e[0]: e for e in raw}
 
     kept_ids: set[int] = set()
     keep: list[tuple] = []
@@ -1462,7 +1513,13 @@ with tab_map:
     map_min = map_min_mb * 1024 * 1024
     map_include_files = st.checkbox(t("map_include_files"), value=False,
                                     key="map_include_files")
-    rows = treemap_rows(selected_db, map_min, map_include_files)
+    # Precompute dirs + sizes ONCE per DB (0.9s), reuse across slider changes
+    _map_key = f"treemap_pre_{selected_db}"
+    if _map_key not in st.session_state:
+        with st.spinner(t("calculating")):
+            st.session_state[_map_key] = _treemap_precompute(selected_db)
+    rows = treemap_rows(selected_db, map_min, map_include_files,
+                        _precomputed=st.session_state[_map_key])
     if not rows:
         st.info(t("map_empty"))
     else:
