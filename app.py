@@ -29,7 +29,7 @@ from drive_xray import (
     latest_snapshot_id, list_snapshots, diff_snapshots,
     registry_list, registry_remove, registry_register,
     cross_dedupe, read_drive_index_opts,
-    verify_file, execute_file_action, QUARANTINE_DIR,
+    verify_file, execute_file_action, QUARANTINE_DIR, AUDIT_LOG,
     read_config, write_config, get_db_dir, import_folder,
 )
 
@@ -1115,8 +1115,14 @@ if "del_plan" in st.session_state:
                 t("del_execute_btn", n=len(_exec_files), size=human(_bytes_free)),
                 type="primary", use_container_width=True, key="dd_exec",
             ):
-                _results = [execute_file_action(d["full_path"], _daction)
-                            for d in _exec_files]
+                _results = [
+                    execute_file_action(
+                        d["full_path"], _daction,
+                        root_path=_droot,
+                        db_path=str(st.session_state.get("db_choice_path", "")),
+                    )
+                    for d in _exec_files
+                ]
                 _ok_count = sum(1 for r in _results if r["ok"])
                 _freed = sum(d["size"] for d, r in zip(_exec_files, _results)
                              if r["ok"])

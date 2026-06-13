@@ -23,6 +23,7 @@ of the same size, and ~constant time regardless of file size.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime
 import hashlib
 import json
@@ -496,6 +497,17 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> bool:
 
 
 QUARANTINE_DIR = Path.home() / ".drive-xray-quarantine"
+AUDIT_LOG = Path.home() / ".config" / "drive-xray" / "audit.jsonl"
+
+
+def _append_audit(record: dict) -> None:
+    """Append one JSON line to the persistent audit log; silently ignored on error."""
+    try:
+        AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with AUDIT_LOG.open("a", encoding="utf-8") as _f:
+            _f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def verify_file(root_path: Path, rel_path: str, expected_size: int) -> dict:
@@ -522,16 +534,48 @@ def verify_file(root_path: Path, rel_path: str, expected_size: int) -> dict:
     return {"ok": True, "full_path": str(full), "reason": None}
 
 
-def execute_file_action(full_path: str, action: str) -> dict:
+def execute_file_action(
+    full_path: str,
+    action: str,
+    root_path: Path | None = None,
+    db_path: str = "",
+) -> dict:
     """Move a file to quarantine or delete it permanently.
 
     action: "quarantine" | "delete"
+    root_path: when supplied, the target must be inside this directory (path
+               containment check prevents acting on files outside the drive).
     Returns {"ok": bool, "full_path": str, "dest": str | None, "error": str | None}.
+    Every completed action (ok or error) is appended to AUDIT_LOG.
     """
-    p = Path(full_path)
+    p = Path(full_path).resolve()
+
+    # Containment check — reject paths that escape the drive root
+    if root_path is not None:
+        try:
+            p.relative_to(root_path.resolve())
+        except ValueError:
+            result = {
+                "ok": False, "full_path": full_path, "dest": None,
+                "error": f"path_outside_root: {full_path!r} not under {root_path!r}",
+            }
+            _append_audit({
+                "ts": datetime.datetime.now().isoformat(),
+                "action": action, "src": full_path, "dest": None,
+                "db": db_path, **{k: result[k] for k in ("ok", "error")},
+            })
+            return result
+
     if not p.exists():
-        return {"ok": False, "full_path": full_path, "dest": None,
-                "error": "not_found"}
+        result = {"ok": False, "full_path": full_path, "dest": None,
+                  "error": "not_found"}
+        _append_audit({
+            "ts": datetime.datetime.now().isoformat(),
+            "action": action, "src": full_path, "dest": None,
+            "db": db_path, "ok": False, "error": "not_found",
+        })
+        return result
+
     try:
         if action == "quarantine":
             QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
@@ -539,12 +583,23 @@ def execute_file_action(full_path: str, action: str) -> dict:
             if dest.exists():
                 dest = QUARANTINE_DIR / f"{p.stem}_{int(time.time())}{p.suffix}"
             shutil.move(str(p), str(dest))
-            return {"ok": True, "full_path": full_path, "dest": str(dest), "error": None}
+            result = {"ok": True, "full_path": full_path, "dest": str(dest), "error": None}
         else:
             p.unlink()
-            return {"ok": True, "full_path": full_path, "dest": None, "error": None}
+            result = {"ok": True, "full_path": full_path, "dest": None, "error": None}
     except Exception as exc:
-        return {"ok": False, "full_path": full_path, "dest": None, "error": str(exc)}
+        result = {"ok": False, "full_path": full_path, "dest": None, "error": str(exc)}
+
+    _append_audit({
+        "ts": datetime.datetime.now().isoformat(),
+        "action": action,
+        "src": full_path,
+        "dest": result.get("dest"),
+        "db": db_path,
+        "ok": result["ok"],
+        "error": result["error"],
+    })
+    return result
 
 
 # ---------- central registry ----------
@@ -999,6 +1054,7 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
              total_size, HASH_VERSION, int(one_fs), int(skip_cloud)),
         )
     conn.commit()
+    conn.execute("PRAGMA optimize")  # refresh query-planner statistics after bulk inserts
     conn.close()
     elapsed = time.time() - t0
     extras = []
@@ -1017,9 +1073,14 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
 # ---------- dedupe ----------
 
 def fill_full_hashes(conn: sqlite3.Connection, root: Path, min_size: int,
-                     snapshot_id: int | None = None) -> int:
+                     snapshot_id: int | None = None,
+                     workers: int | None = None) -> int:
     """For files sharing (size, partial_hash) within one snapshot, compute
-    full_hash. Defaults to the latest snapshot."""
+    full_hash using parallel I/O threads.
+
+    workers: thread count (default: min(4, cpu_count)).  HDD users can pass
+             workers=1 to avoid seek contention; NVMe users can go higher.
+    """
     sid = snapshot_id if snapshot_id is not None else latest_snapshot_id(conn)
     if sid is None:
         return 0
@@ -1033,7 +1094,7 @@ def fill_full_hashes(conn: sqlite3.Connection, root: Path, min_size: int,
     if not rows:
         return 0
     cur = conn.cursor()
-    todo = []
+    todo: list[tuple[int, str]] = []
     for size, partial in rows:
         for (rid, rel) in conn.execute(
             "SELECT id, rel_path FROM entries"
@@ -1044,15 +1105,35 @@ def fill_full_hashes(conn: sqlite3.Connection, root: Path, min_size: int,
             todo.append((rid, rel))
     if not todo:
         return 0
-    print(f"  computing full hashes for {len(todo)} candidate files...", file=sys.stderr)
+
+    n = workers if workers is not None else min(4, os.cpu_count() or 1)
+    print(
+        f"  computing full hashes for {len(todo)} candidate files "
+        f"({n} thread{'s' if n != 1 else ''})...",
+        file=sys.stderr,
+    )
     t0 = time.time()
-    for i, (rid, rel) in enumerate(todo, 1):
-        h = full_hash(root / rel)
-        cur.execute("UPDATE entries SET full_hash=? WHERE id=?", (h, rid))
-        if i % 50 == 0:
-            conn.commit()
-            print(f"\r    {i}/{len(todo)}  ({(time.time()-t0):.0f}s)", end="", file=sys.stderr)
+    done = 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n) as pool:
+        # GIL is released during file read() — threads overlap I/O wait
+        future_to_rid = {pool.submit(full_hash, root / rel): rid
+                         for rid, rel in todo}
+        for fut in concurrent.futures.as_completed(future_to_rid):
+            rid = future_to_rid[fut]
+            try:
+                h = fut.result()
+            except Exception:
+                h = None
+            cur.execute("UPDATE entries SET full_hash=? WHERE id=?", (h, rid))
+            done += 1
+            if done % 50 == 0:
+                conn.commit()
+                print(f"\r    {done}/{len(todo)}  ({time.time()-t0:.0f}s)",
+                      end="", file=sys.stderr)
+
     conn.commit()
+    conn.execute("PRAGMA optimize")  # full_hash updates shift index statistics significantly
     print(f"\r    done {len(todo)} hashes in {time.time()-t0:.1f}s", file=sys.stderr)
     return len(todo)
 
@@ -1125,7 +1206,8 @@ def human(n: int) -> str:
     return f"{n:.1f}PB"
 
 
-def dedupe(db_path: Path, min_size: int, mode: str) -> None:
+def dedupe(db_path: Path, min_size: int, mode: str,
+           workers: int | None = None) -> None:
     conn = open_db(db_path)
     drive = conn.execute("SELECT root_path, label FROM drive LIMIT 1").fetchone()
     if not drive:
@@ -1138,7 +1220,7 @@ def dedupe(db_path: Path, min_size: int, mode: str) -> None:
         if not root.exists():
             print(f"  warning: root {root} not mounted — using existing full_hash only", file=sys.stderr)
         else:
-            fill_full_hashes(conn, root, min_size, snapshot_id=sid)
+            fill_full_hashes(conn, root, min_size, snapshot_id=sid, workers=workers)
 
     if mode in ("both", "dirs-only"):
         compute_dir_hashes(conn, snapshot_id=sid)
@@ -1488,13 +1570,13 @@ def _duplicate_rows(conn: sqlite3.Connection, min_size: int,
 
 
 def export_duplicates(db_path: Path, out_path: Path, fmt: str,
-                      min_size: int) -> None:
+                      min_size: int, workers: int | None = None) -> None:
     conn = open_db(db_path)
     drv = conn.execute("SELECT root_path FROM drive LIMIT 1").fetchone()
     if drv:
         root = Path(drv[0])
         if root.is_dir():
-            fill_full_hashes(conn, root, min_size)
+            fill_full_hashes(conn, root, min_size, workers=workers)
         else:
             print(f"  warning: root {root} not mounted — using existing"
                   " full_hash only", file=sys.stderr)
@@ -1949,6 +2031,8 @@ def main():
     pd = sub.add_parser("dedupe", help="find duplicates within an indexed drive")
     pd.add_argument("db", type=Path)
     pd.add_argument("--min-size", type=int, default=1024, help="ignore files smaller than this (bytes)")
+    pd.add_argument("--workers", type=int, default=None, metavar="N",
+                    help="I/O threads for full hashing (default: min(4, cpu_count))")
     grp = pd.add_mutually_exclusive_group()
     grp.add_argument("--files-only", dest="mode", action="store_const", const="files-only")
     grp.add_argument("--dirs-only", dest="mode", action="store_const", const="dirs-only")
@@ -2023,6 +2107,8 @@ def main():
     pe.add_argument("--min-size", type=int, default=1024)
     pe.add_argument("--format", choices=("csv", "xlsx"),
                     help="override format (default: inferred from extension)")
+    pe.add_argument("--workers", type=int, default=None, metavar="N",
+                    help="I/O threads for full hashing (default: min(4, cpu_count))")
 
     sub.add_parser("drives", help="list all drives registered in the central index")
 
@@ -2071,7 +2157,7 @@ def main():
         if args.db is None:
             registry_register(db, label, args.root)
     elif args.cmd == "dedupe":
-        dedupe(args.db, args.min_size, args.mode)
+        dedupe(args.db, args.min_size, args.mode, workers=args.workers)
     elif args.cmd == "compare":
         compare(args.db_a, args.db_b, args.min_size)
     elif args.cmd == "refresh":
@@ -2135,7 +2221,8 @@ def main():
         fmt = args.format or args.out.suffix.lstrip(".").lower()
         if fmt not in ("csv", "xlsx"):
             sys.exit(f"cannot infer format from extension {args.out.suffix!r}; use --format")
-        export_duplicates(args.db, args.out, fmt, args.min_size)
+        export_duplicates(args.db, args.out, fmt, args.min_size,
+                          workers=args.workers)
     elif args.cmd == "import-folder":
         results = import_folder(args.folder)
         new = [r for r in results if not r["already_registered"]]

@@ -171,6 +171,9 @@ pub fn index_drive(
             )?;
         }
     }
+    // Refresh query-planner statistics after bulk inserts so subsequent queries
+    // (dedupe, diff, doctor) pick optimal index paths without a manual ANALYZE.
+    conn2.execute_batch("PRAGMA optimize")?;
     Ok(snap_id)
 }
 

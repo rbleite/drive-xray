@@ -193,3 +193,167 @@ def test_doctor_detects_missing_index(rust_indexed_db):
     r = dx_rust("doctor", str(rust_indexed_db))
     assert r.returncode == 1, f"doctor should exit 1 when index missing\n{r.stdout}"
     assert "idx_snap_size_partial" in r.stdout, r.stdout
+
+
+# ── symlinks ──────────────────────────────────────────────────────────────────
+
+def test_symlink_indexed_not_followed(tmp_path):
+    """Symlinks must be stored with is_symlink=1 and no hash.
+    Symlinks to directories must not be followed — their contents stay absent."""
+    d = tmp_path / "drive"
+    d.mkdir()
+
+    (d / "real.txt").write_text("hello\n")
+    (d / "link.txt").symlink_to(d / "real.txt")  # valid symlink to a file
+
+    sub = d / "subdir"
+    sub.mkdir()
+    (sub / "data.bin").write_bytes(b"\xca\xfe" * 50)
+    (d / "linkdir").symlink_to(sub)              # symlink to a directory — must NOT be followed
+
+    db = tmp_path / "sym.db"
+    r = dx_py("index", str(d), "--db", str(db), "--label", "sym")
+    assert r.returncode == 0, r.stderr
+
+    sid = _sid(db)
+
+    # file symlink: indexed with is_symlink=1, no hash
+    syms = _query(db,
+        "SELECT rel_path, partial_hash FROM entries WHERE snapshot_id=? AND is_symlink=1",
+        sid)
+    sym_names = {row[0] for row in syms}
+    assert "link.txt" in sym_names, "file symlink must be indexed with is_symlink=1"
+    for _, ph in syms:
+        assert ph is None, "symlinks must not have partial_hash"
+
+    # dir symlink itself is indexed as is_symlink=1
+    linkdir_row = _query(db,
+        "SELECT is_symlink FROM entries WHERE snapshot_id=? AND rel_path='linkdir'", sid)
+    assert linkdir_row and linkdir_row[0][0] == 1, "directory symlink must have is_symlink=1"
+
+    # real.txt hashed independently of its symlink
+    real = _query(db,
+        "SELECT partial_hash FROM entries WHERE snapshot_id=? AND rel_path='real.txt'", sid)
+    assert real and real[0][0] is not None, "real file must be hashed"
+
+    # nothing under linkdir/ must appear — directory symlink must not be followed
+    file_paths = {row[0] for row in _query(db,
+        "SELECT rel_path FROM entries WHERE snapshot_id=? AND is_dir=0", sid)}
+    assert not any(p.startswith("linkdir") for p in file_paths), \
+        f"symlinked directory was followed — found: {[p for p in file_paths if p.startswith('linkdir')]}"
+
+    # metadata total_files counts only hashed non-symlink files: real.txt + subdir/data.bin = 2
+    meta = _query(db, "SELECT total_files FROM snapshots WHERE id=?", sid)[0][0]
+    assert meta == 2, f"expected 2 hashed files in snapshot metadata, got {meta}"
+
+
+# ── refresh / hash-cache ──────────────────────────────────────────────────────
+
+def test_refresh_reuses_hashes(tmp_drive, tmp_path):
+    """Refresh must reuse partial_hash for unchanged files and recompute only
+    for files that changed (size or mtime shifted)."""
+    db = tmp_path / "ref.db"
+    r = dx_py("index", str(tmp_drive), "--db", str(db), "--label", "t")
+    assert r.returncode == 0, r.stderr
+
+    sid = _sid(db)
+    before = {row[0]: row[1] for row in _query(db,
+        "SELECT rel_path, hex(partial_hash) FROM entries "
+        "WHERE snapshot_id=? AND is_dir=0 AND partial_hash IS NOT NULL", sid)}
+
+    # Modify one file so its mtime changes
+    (tmp_drive / "alpha.txt").write_text("completely different content\n")
+
+    r2 = dx_py("refresh", str(db))
+    assert r2.returncode == 0, r2.stderr
+
+    # Refresh reports how many entries it reused from the cache
+    assert "reusing" in r2.stderr, \
+        f"refresh must report cache reuse in stderr; got: {r2.stderr!r}"
+
+    sid2 = _sid(db)  # refresh overwrites the same snapshot
+    after = {row[0]: row[1] for row in _query(db,
+        "SELECT rel_path, hex(partial_hash) FROM entries "
+        "WHERE snapshot_id=? AND is_dir=0 AND partial_hash IS NOT NULL", sid2)}
+
+    # Modified file must get a fresh hash
+    assert before.get("alpha.txt") != after.get("alpha.txt"), \
+        "modified file must get a new hash after refresh"
+
+    # Unchanged files must keep the same hash (cache was reused, not recomputed)
+    for path in ("beta.txt", "dup_a.bin", "dup_b.bin"):
+        assert before.get(path) == after.get(path), \
+            f"{path} hash changed despite file being unchanged — cache not reused"
+
+
+# ── schema migration ──────────────────────────────────────────────────────────
+
+def test_schema_migration_v4_to_v5(tmp_path):
+    """open_db() must transparently upgrade a v4 database (no paths table,
+    no path_id column) to v5 (path interning with integer path_id join)."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).parent.parent))
+
+    db = tmp_path / "v4.db"
+
+    # Build a minimal v4 schema manually — no paths table, no path_id column
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE drive (
+            id INTEGER PRIMARY KEY, label TEXT, root_path TEXT NOT NULL,
+            indexed_at TEXT NOT NULL, total_files INTEGER, total_dirs INTEGER,
+            total_size INTEGER, hash_version INTEGER
+        );
+        CREATE TABLE snapshots (
+            id INTEGER PRIMARY KEY, taken_at TEXT NOT NULL, label TEXT,
+            total_files INTEGER, total_dirs INTEGER, total_size INTEGER,
+            hash_version INTEGER
+        );
+        CREATE TABLE entries (
+            id INTEGER PRIMARY KEY,
+            snapshot_id INTEGER NOT NULL,
+            rel_path TEXT NOT NULL,
+            parent_id INTEGER,
+            is_dir INTEGER NOT NULL,
+            size INTEGER, mtime REAL, partial_hash BLOB, full_hash BLOB,
+            is_symlink INTEGER DEFAULT 0, error TEXT, inode INTEGER, device INTEGER
+        );
+        CREATE UNIQUE INDEX idx_snap_path ON entries(snapshot_id, rel_path);
+        INSERT INTO snapshots (taken_at, label, hash_version)
+            VALUES ('2024-01-01T00:00:00', 'test', 2);
+        INSERT INTO drive (label, root_path, indexed_at, hash_version)
+            VALUES ('test', '/tmp/test', '2024-01-01T00:00:00', 2);
+        INSERT INTO entries (snapshot_id, rel_path, parent_id, is_dir, size)
+            VALUES (1, '.', NULL, 1, NULL);
+        INSERT INTO entries (snapshot_id, rel_path, parent_id, is_dir, size)
+            VALUES (1, 'subdir', 1, 1, NULL);
+        INSERT INTO entries (snapshot_id, rel_path, parent_id, is_dir, size)
+            VALUES (1, 'subdir/file.txt', 2, 0, 42);
+    """)
+    conn.commit()
+    conn.close()
+
+    from drive_xray import open_db
+    conn2 = open_db(db)
+
+    # v5: paths table must exist
+    tables = {r[0] for r in conn2.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "paths" in tables, "migration must create the paths table"
+
+    # v5: entries.path_id column must exist and be fully populated
+    cols = {r[1] for r in conn2.execute("PRAGMA table_info(entries)")}
+    assert "path_id" in cols, "migration must add path_id column to entries"
+
+    null_pids = conn2.execute(
+        "SELECT COUNT(*) FROM entries WHERE path_id IS NULL").fetchone()[0]
+    assert null_pids == 0, f"{null_pids} entries still have NULL path_id after migration"
+
+    # v5: integer-based index exists; old text-based index dropped
+    indexes = {r[0] for r in conn2.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'")}
+    assert "idx_snap_path_id" in indexes, "v5 index idx_snap_path_id must exist after migration"
+    assert "idx_snap_path" not in indexes, \
+        "old text index idx_snap_path must be dropped after v5 migration"
+
+    conn2.close()
