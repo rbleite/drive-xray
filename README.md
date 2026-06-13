@@ -7,6 +7,7 @@
 **Know exactly what's on every drive, and what's redundant across them.**
 
 [![macOS](https://img.shields.io/badge/macOS-11+-black?logo=apple)](https://www.apple.com/macos/)
+[![Windows](https://img.shields.io/badge/Windows-10+-0078D4?logo=windows)](https://www.microsoft.com/windows/)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![Rust](https://img.shields.io/badge/Rust-1.75+-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -81,16 +82,13 @@ macOS-specific defenses:
 
 ## Quick install
 
+### macOS / Linux
+
 ```bash
 git clone https://github.com/rbleite/drive-xray.git
 cd drive-xray
 python3 -m venv .venv
-.venv/bin/pip install streamlit openpyxl plotly
-```
-
-Launch the UI:
-
-```bash
+.venv/bin/pip install -r requirements.txt
 .venv/bin/streamlit run app.py
 ```
 
@@ -103,6 +101,33 @@ open ~/Applications/drive-xray.app
 
 (The launcher auto-opens your browser at http://localhost:8501, with a
 real icon in the Dock and Spotlight.)
+
+### Windows
+
+Requirements: [Python 3.10+](https://www.python.org/downloads/) — during install, tick **"Add Python to PATH"**.
+
+```bat
+git clone https://github.com/rbleite/drive-xray.git
+cd drive-xray
+start.bat
+```
+
+`start.bat` creates a virtual environment, installs dependencies, and launches the UI — all in one step. Double-click it on subsequent runs.
+
+> **Tip:** to index a drive from the CLI on Windows, use the `dx` command in the same terminal:
+> ```bat
+> .venv\Scripts\python drive_xray.py index D:\ --label "External_D"
+> ```
+
+### Multi-machine sync (OneDrive / Google Drive / Dropbox)
+
+Store all `.db` index files in a shared cloud folder so every machine
+sees every drive — even offline.
+
+1. Open the UI → sidebar → **⚙️ Configurações / Settings**
+2. Set the folder to your local OneDrive/GDrive path (e.g. `C:\Users\you\OneDrive`)
+3. Click **Import .db files from this folder** to pick up indexes synced from other machines
+4. New indexes created on this machine go there automatically
 
 ### Optional Rust engine (~10× faster on large drives)
 
