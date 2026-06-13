@@ -1657,6 +1657,73 @@ def compare(db_a: Path, db_b: Path, min_size: int) -> None:
     ca.close(); cb.close()
 
 
+# ---------- cross-drive dedupe ----------
+
+def cross_dedupe(
+    db_labels: list[tuple[Path, str]],
+    min_size: int = 1024 * 1024,
+) -> list[dict]:
+    """Find files duplicated across multiple drives.
+
+    db_labels — list of (db_path, drive_label).
+    Returns groups sorted by wasted_bytes desc. Each group:
+      {"size": int, "confirmed": bool, "wasted_bytes": int,
+       "copies": [{"drive": str, "path": str}, ...]}
+    Drives that are not mounted / have no snapshot are silently skipped.
+    """
+    # (size, partial_hash) → [(rel_path, full_hash_or_None, drive_label)]
+    index: dict[tuple[int, bytes], list] = defaultdict(list)
+
+    for db_path, label in db_labels:
+        try:
+            conn = open_db(db_path)
+        except Exception:
+            continue
+        sid = latest_snapshot_id(conn)
+        if sid is None:
+            conn.close()
+            continue
+        for size, partial, rel, fh in conn.execute(
+            "SELECT size, partial_hash, rel_path, full_hash FROM entries"
+            " WHERE snapshot_id=? AND is_dir=0 AND size>=? AND partial_hash IS NOT NULL",
+            (sid, min_size),
+        ):
+            index[(size, partial)].append((rel, fh, label))
+        conn.close()
+
+    groups: list[dict] = []
+    for (size, _partial), copies in index.items():
+        # skip groups entirely within one drive
+        if len({c[2] for c in copies}) < 2:
+            continue
+
+        all_have_fh = all(c[1] is not None for c in copies)
+        if all_have_fh:
+            # group further by exact full_hash
+            by_fh: dict[bytes, list] = defaultdict(list)
+            for rel, fh, lbl in copies:
+                by_fh[fh].append({"drive": lbl, "path": rel})
+            for sub in by_fh.values():
+                if len({c["drive"] for c in sub}) < 2:
+                    continue
+                groups.append({
+                    "size": size,
+                    "confirmed": True,
+                    "wasted_bytes": size * (len(sub) - 1),
+                    "copies": sub,
+                })
+        else:
+            groups.append({
+                "size": size,
+                "confirmed": False,
+                "wasted_bytes": size * (len(copies) - 1),
+                "copies": [{"drive": c[2], "path": c[0]} for c in copies],
+            })
+
+    groups.sort(key=lambda g: -g["wasted_bytes"])
+    return groups
+
+
 # ---------- cli ----------
 
 def main():
@@ -1758,6 +1825,19 @@ def main():
 
     sub.add_parser("drives", help="list all drives registered in the central index")
 
+    pxd = sub.add_parser(
+        "cross-dedupe",
+        help="find duplicate files across multiple drives (works offline)",
+    )
+    pxd.add_argument(
+        "dbs", nargs="*", type=Path,
+        help="db files to compare (default: all registered drives)",
+    )
+    pxd.add_argument("--all", dest="use_all", action="store_true",
+                     help="use all drives from the central registry")
+    pxd.add_argument("--min-size", type=int, default=1024 * 1024,
+                     metavar="BYTES", help="ignore files smaller than this (default 1 MB)")
+
     args = p.parse_args()
 
     if args.cmd == "index":
@@ -1851,6 +1931,40 @@ def main():
                     f"  {e['label']:<20}  {e['last_indexed']:<20}"
                     f"  {e['root']:<40}  {e['db']}{status}"
                 )
+    elif args.cmd == "cross-dedupe":
+        if args.use_all or not args.dbs:
+            reg = registry_list()
+            db_labels = [(e["db"], e["label"]) for e in reg if e["exists"]]
+        else:
+            db_labels = []
+            for db in args.dbs:
+                try:
+                    conn = open_db(db)
+                    row = conn.execute(
+                        "SELECT label FROM drive LIMIT 1"
+                    ).fetchone()
+                    conn.close()
+                    db_labels.append((db, row[0] if row else db.stem))
+                except Exception as exc:
+                    print(f"  skip {db}: {exc}", file=sys.stderr)
+        if len(db_labels) < 2:
+            sys.exit("cross-dedupe needs at least 2 drives. Use --all or pass db files.")
+        labels_str = ", ".join(f"{lbl}({db.name})" for db, lbl in db_labels)
+        print(f"cross-dedupe across {len(db_labels)} drives: {labels_str}", file=sys.stderr)
+        groups = cross_dedupe(db_labels, min_size=args.min_size)
+        if not groups:
+            print("  no cross-drive duplicates found.")
+        else:
+            total_wasted = sum(g["wasted_bytes"] for g in groups)
+            print(f"  {len(groups)} groups · {human(total_wasted)} wasted\n")
+            for i, g in enumerate(groups, 1):
+                tag = "=" if g["confirmed"] else "≈"
+                print(f"  [{i}] {tag} {human(g['size'])}")
+                for c in g["copies"]:
+                    print(f"       {c['drive']:<20}  {c['path']}")
+                if i >= 200:
+                    print(f"  … {len(groups)-200} more groups not shown")
+                    break
 
 
 if __name__ == "__main__":

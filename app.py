@@ -25,6 +25,7 @@ from drive_xray import (
     CLEANUP_STRATEGIES, CLEANUP_ACTIONS,
     latest_snapshot_id, list_snapshots, diff_snapshots,
     registry_list, registry_remove, registry_register,
+    cross_dedupe,
 )
 
 DB_DIR = Path.home() / "tools" / "drive-xray"
@@ -126,6 +127,20 @@ TRANSLATIONS = {
         "duplicate_folders": "Pastas duplicadas",
         "identical_folders": "pastas idênticas",
         "need_two_drives": "Precisas de pelo menos duas drives indexadas para comparar.",
+        "cross_title": "🔀 Duplicados entre todas as drives",
+        "cross_caption": "Compara todos os índices em simultâneo. As drives não precisam de estar montadas.",
+        "cross_btn": "Procurar duplicados entre todas as drives",
+        "cross_groups": "Grupos",
+        "cross_wasted": "Espaço desperdiçado",
+        "cross_confirmed": "Confirmados (=)",
+        "cross_approx": "Aproximados (≈)",
+        "cross_no_results": "Nenhum duplicado entre drives encontrado com o tamanho mínimo seleccionado.",
+        "cross_col_group": "#",
+        "cross_col_drive": "drive",
+        "cross_col_path": "caminho",
+        "cross_col_size": "tamanho",
+        "cross_col_match": "match",
+        "cross_need_drives": "Precisa de pelo menos 2 drives indexadas.",
         "compare_with": "Comparar com",
         "minimum_mb": "Mínimo (MB)",
         "compare_button": "Comparar",
@@ -252,6 +267,20 @@ TRANSLATIONS = {
         "duplicate_folders": "Duplicate folders",
         "identical_folders": "identical folders",
         "need_two_drives": "You need at least two indexed drives to compare.",
+        "cross_title": "🔀 Duplicates across all drives",
+        "cross_caption": "Compares all indexes at once. Drives do not need to be mounted.",
+        "cross_btn": "Find duplicates across all drives",
+        "cross_groups": "Groups",
+        "cross_wasted": "Wasted space",
+        "cross_confirmed": "Confirmed (=)",
+        "cross_approx": "Approximate (≈)",
+        "cross_no_results": "No cross-drive duplicates found at the selected minimum size.",
+        "cross_col_group": "#",
+        "cross_col_drive": "drive",
+        "cross_col_path": "path",
+        "cross_col_size": "size",
+        "cross_col_match": "match",
+        "cross_need_drives": "Need at least 2 indexed drives.",
         "compare_with": "Compare with",
         "minimum_mb": "Minimum (MB)",
         "compare_button": "Compare",
@@ -1120,6 +1149,63 @@ with tab_history:
 
 # --- Compare ---
 with tab_compare:
+    # ── cross-drive dedupe (all drives at once) ──────────────────────────────
+    st.subheader(t("cross_title"))
+    st.caption(t("cross_caption"))
+
+    if len(dbs) < 2:
+        st.info(t("cross_need_drives"))
+    else:
+        min_size_mb_x = st.slider(
+            t("minimum_mb"), 0, 500, 1, key="xdp_min"
+        )
+        if st.button(t("cross_btn"), type="primary", key="xdp_btn"):
+            db_labels = []
+            for _db in dbs:
+                _reg = _reg_entries.get(_db.resolve(), {})
+                db_labels.append((_db, _reg.get("label", _db.stem)))
+            with st.spinner(t("calculating")):
+                _xgroups = cross_dedupe(db_labels, min_size=min_size_mb_x * 1024 * 1024)
+            st.session_state["xdp_groups"] = _xgroups
+
+        if "xdp_groups" in st.session_state:
+            _xgroups = st.session_state["xdp_groups"]
+            if not _xgroups:
+                st.info(t("cross_no_results"))
+            else:
+                _total_wasted = sum(g["wasted_bytes"] for g in _xgroups)
+                _confirmed = sum(1 for g in _xgroups if g["confirmed"])
+                _approx = len(_xgroups) - _confirmed
+                xc1, xc2, xc3, xc4 = st.columns(4)
+                xc1.metric(t("cross_groups"), f"{len(_xgroups):,}")
+                xc2.metric(t("cross_wasted"), human(_total_wasted))
+                xc3.metric(t("cross_confirmed"), f"{_confirmed:,}")
+                xc4.metric(t("cross_approx"), f"{_approx:,}")
+
+                # flatten to rows: one row per copy
+                _rows = []
+                for i, g in enumerate(_xgroups[:500], 1):
+                    _tag = "=" if g["confirmed"] else "≈"
+                    for c in g["copies"]:
+                        _rows.append({
+                            t("cross_col_group"): i,
+                            t("cross_col_match"): _tag,
+                            t("cross_col_size"): human(g["size"]),
+                            t("cross_col_drive"): c["drive"],
+                            t("cross_col_path"): c["path"],
+                            "_bytes": g["size"],
+                        })
+                st.dataframe(
+                    [{k: v for k, v in r.items() if k != "_bytes"} for r in _rows],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                if len(_xgroups) > 500:
+                    st.caption(f"+ {len(_xgroups) - 500} {t('groups_not_shown')}")
+
+    st.divider()
+
+    # ── pair comparison ──────────────────────────────────────────────────────
     other_dbs = [d for d in dbs if d != selected_db]
     if not other_dbs:
         st.info(t("need_two_drives"))
