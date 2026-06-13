@@ -1732,11 +1732,14 @@ def compact_db(db_path: Path) -> None:
     conn = open_db(db_path)
     conn.commit()
     conn.close()
-    # Step 2: fresh autocommit connection for checkpoint + VACUUM.
-    print("  checkpoint + vacuum...", file=sys.stderr)
+    # Step 2: fresh autocommit connection for checkpoint + VACUUM + checkpoint.
+    # VACUUM in WAL mode writes a new copy through the WAL, so we need a
+    # second checkpoint after VACUUM to fold it back in and truncate the WAL.
+    print("  checkpoint + vacuum + checkpoint...", file=sys.stderr)
     conn = sqlite3.connect(db_path, isolation_level=None)
     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     conn.execute("VACUUM")
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")  # fold VACUUM output back in
     conn.close()
     after = db_path.stat().st_size
     after_wal = wal.stat().st_size if wal.exists() else 0
