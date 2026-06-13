@@ -121,6 +121,20 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// List duplicate file groups within a drive (JSON for Streamlit).
+    DupGroups {
+        db: PathBuf,
+        #[arg(long, default_value_t = 1024)]
+        min_size: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List duplicate folder groups within a drive (JSON for Streamlit).
+    DupFolders {
+        db: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Find duplicates across multiple indexed drives.
     CrossDedupe {
         /// Paths to .db index files to compare (two or more).
@@ -267,6 +281,14 @@ pub fn dispatch() -> anyhow::Result<()> {
         Command::Compact { db } => {
             eprintln!("compacting {}", db.display());
             crate::compact::compact(&db)?;
+            Ok(())
+        }
+        Command::DupGroups { db, min_size, json } => {
+            crate::dup_groups::run_files(&db, min_size, json)?;
+            Ok(())
+        }
+        Command::DupFolders { db, json } => {
+            crate::dup_groups::run_folders(&db, json)?;
             Ok(())
         }
         Command::ExtBreakdown { db, limit, json } => {

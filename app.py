@@ -1191,10 +1191,34 @@ with tab_dupes:
     _cache_key = f"dupes_cache_{selected_db}"
     if _cache_key not in st.session_state:
         with st.spinner(t("calculating")):
-            st.session_state[_cache_key] = (
-                dup_file_groups(selected_db, 1024),
-                dup_folder_groups(selected_db),
-            )
+            if DX_IS_RUST:
+                import threading as _threading
+                _rf, _rd = [None], [None]
+                def _run_files():
+                    p = subprocess.run(
+                        [*DX_CMD, "dup-groups", str(selected_db),
+                         "--min-size", "1024", "--json"],
+                        capture_output=True, text=True,
+                    )
+                    _rf[0] = json.loads(p.stdout) if p.returncode == 0 and p.stdout.strip() \
+                              else dup_file_groups(selected_db, 1024)
+                def _run_folders():
+                    p = subprocess.run(
+                        [*DX_CMD, "dup-folders", str(selected_db), "--json"],
+                        capture_output=True, text=True,
+                    )
+                    _rd[0] = json.loads(p.stdout) if p.returncode == 0 and p.stdout.strip() \
+                              else dup_folder_groups(selected_db)
+                _t1 = _threading.Thread(target=_run_files)
+                _t2 = _threading.Thread(target=_run_folders)
+                _t1.start(); _t2.start()
+                _t1.join(); _t2.join()
+                st.session_state[_cache_key] = (_rf[0], _rd[0])
+            else:
+                st.session_state[_cache_key] = (
+                    dup_file_groups(selected_db, 1024),
+                    dup_folder_groups(selected_db),
+                )
     _all_files, _all_folders = st.session_state[_cache_key]
 
     min_size_mb = st.slider(t("ignore_smaller_mb"), 0, 500, 1)
