@@ -853,10 +853,10 @@ def build_xlsx(rows: list[dict]) -> bytes:
             cell.fill = fill
         for r in rows:
             ws.append([r[h] for h in headers])
+        from openpyxl.utils import get_column_letter
         widths = {"path": 60, "hash": 28, "size_human": 12, "wasted_human": 14}
         for i, h in enumerate(headers, 1):
-            col_letter = chr(64 + i) if i <= 26 else "A"
-            ws.column_dimensions[col_letter].width = widths.get(h, 14)
+            ws.column_dimensions[get_column_letter(i)].width = widths.get(h, 14)
         ws.freeze_panes = "A2"
     buf = io.BytesIO()
     wb.save(buf)
@@ -1434,7 +1434,7 @@ with tab_dupes:
             key="del_action_sel",
         )
 
-        _marked = _edited[_edited[t("del_col")] == True]
+        _marked = _edited[_edited[t("del_col")].astype(bool)]
         _n_marked = len(_marked)
         _bytes_marked = int(_marked["_size"].sum()) if _n_marked else 0
 
@@ -1448,8 +1448,8 @@ with tab_dupes:
                 _plan = []
                 for _gid in _marked["#"].unique():
                     _gdf = _edited[_edited["#"] == _gid]
-                    _keepers = _gdf[_gdf[t("del_col")] == False]
-                    _to_del = _gdf[_gdf[t("del_col")] == True]
+                    _keepers = _gdf[~_gdf[t("del_col")].astype(bool)]
+                    _to_del = _gdf[_gdf[t("del_col")].astype(bool)]
 
                     if _keepers.empty:
                         _plan.append({"group": int(_gid),
@@ -1825,7 +1825,7 @@ with tab_compare:
                     hide_index=True,
                 )
                 if len(_xgroups) > 500:
-                    st.caption(f"+ {len(_xgroups) - 500} {t('groups_not_shown')}")
+                    st.caption(t("groups_not_shown", n=len(_xgroups) - 500))
 
     st.divider()
 

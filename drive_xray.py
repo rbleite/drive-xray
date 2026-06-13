@@ -960,7 +960,7 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
                 if cached:
                     old_size, old_mtime, old_partial, old_full = cached
                     # mtime tolerance: 1s handles HFS+ (1s) vs APFS (1ns)
-                    if old_size == size and abs((old_mtime or 0) - st.st_mtime) < 1.0:
+                    if old_size == size and old_mtime is not None and abs(old_mtime - st.st_mtime) < 1.0:
                         partial = old_partial
                         full = old_full
                         reused += 1
@@ -1340,12 +1340,14 @@ def diff_snapshots(db_path: Path, from_id: int | None = None,
         sys.exit("from and to are the same snapshot")
     a, b = from_id, to_id
 
-    # added: in b but not a (file paths only)
+    # v5 schema: path_id is a global int per unique path — same path across
+    # snapshots has the same path_id. Use it for faster int joins instead of
+    # text comparisons on rel_path.
     added = conn.execute(
         "SELECT b.rel_path, b.size FROM entries b"
         " WHERE b.snapshot_id=? AND b.is_dir=0"
         "   AND NOT EXISTS ("
-        "     SELECT 1 FROM entries a WHERE a.snapshot_id=? AND a.rel_path=b.rel_path AND a.is_dir=0"
+        "     SELECT 1 FROM entries a WHERE a.snapshot_id=? AND a.path_id=b.path_id AND a.is_dir=0"
         "   )",
         (b, a),
     ).fetchall()
@@ -1353,13 +1355,13 @@ def diff_snapshots(db_path: Path, from_id: int | None = None,
         "SELECT a.rel_path, a.size FROM entries a"
         " WHERE a.snapshot_id=? AND a.is_dir=0"
         "   AND NOT EXISTS ("
-        "     SELECT 1 FROM entries b WHERE b.snapshot_id=? AND b.rel_path=a.rel_path AND b.is_dir=0"
+        "     SELECT 1 FROM entries b WHERE b.snapshot_id=? AND b.path_id=a.path_id AND b.is_dir=0"
         "   )",
         (a, b),
     ).fetchall()
     modified = conn.execute(
         "SELECT b.rel_path, a.size, b.size FROM entries b"
-        " JOIN entries a ON a.rel_path=b.rel_path"
+        " JOIN entries a ON a.path_id=b.path_id"
         " WHERE b.snapshot_id=? AND a.snapshot_id=? AND b.is_dir=0 AND a.is_dir=0"
         "   AND (b.size != a.size OR b.partial_hash IS NOT a.partial_hash)",
         (b, a),
@@ -1430,31 +1432,40 @@ def print_diff(d: dict) -> None:
 
 def _duplicate_rows(conn: sqlite3.Connection, min_size: int,
                     snapshot_id: int | None = None) -> list[dict]:
-    """Flat row representation of duplicate file groups for export."""
+    """Flat row representation of duplicate file groups for export.
+    Single JOIN query instead of N+1 (one query per group)."""
     sid = snapshot_id if snapshot_id is not None else latest_snapshot_id(conn)
     if sid is None:
         return []
-    groups = conn.execute(
-        "SELECT full_hash, COUNT(*) c FROM entries"
-        " WHERE snapshot_id=? AND is_dir=0 AND full_hash IS NOT NULL"
-        "   AND size >= ?"
-        " GROUP BY full_hash HAVING c > 1",
-        (sid, min_size),
+    # Single JOIN: fetch all members of all duplicate groups at once.
+    all_rows = conn.execute(
+        "SELECT e.full_hash, g.cnt, e.rel_path, e.size, e.inode, e.device"
+        " FROM entries e"
+        " JOIN ("
+        "   SELECT full_hash, COUNT(*) cnt FROM entries"
+        "   WHERE snapshot_id=? AND is_dir=0 AND full_hash IS NOT NULL AND size>=?"
+        "   GROUP BY full_hash HAVING cnt > 1"
+        " ) g ON e.full_hash = g.full_hash"
+        " WHERE e.snapshot_id=? AND e.is_dir=0"
+        " ORDER BY e.full_hash, e.rel_path",
+        (sid, min_size, sid),
     ).fetchall()
+
+    # Group in Python (already ordered by full_hash)
+    by_hash: dict[bytes, list] = defaultdict(list)
+    for fh, cnt, rel, size, ino, dev in all_rows:
+        by_hash[bytes(fh)].append((cnt, rel, size, ino, dev))
+
     rows: list[dict] = []
-    for group_id, (fh, count) in enumerate(groups, 1):
-        members = conn.execute(
-            "SELECT rel_path, size, inode, device FROM entries"
-            " WHERE snapshot_id=? AND full_hash=? AND is_dir=0 ORDER BY rel_path",
-            (sid, fh),
-        ).fetchall()
-        size = members[0][1]
-        distinct = {(ino, dev) for _, _, ino, dev in members if ino is not None}
+    for group_id, (fh, members) in enumerate(by_hash.items(), 1):
+        count = members[0][0]
+        size = members[0][2]
+        hash_hex = fh.hex()
+        distinct = {(ino, dev) for _, _, _, ino, dev in members if ino is not None}
         d = len(distinct) if distinct else count
         wasted = size * (d - 1)
         seen: set[tuple] = set()
-        hash_hex = fh.hex() if isinstance(fh, (bytes, bytearray)) else str(fh)
-        for rel, _, ino, dev in members:
+        for _, rel, _, ino, dev in members:
             key = (ino, dev) if ino is not None else None
             is_hl = key is not None and key in seen
             if key is not None:
