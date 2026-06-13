@@ -897,7 +897,7 @@ with st.sidebar:
         st.rerun()
 
     st.title("💾 drive-xray")
-    st.caption(f"engine: {'🦀 Rust' if DX_IS_RUST else '🐍 Python'}")
+    st.caption(f"engine: {'🦀 Rust' if DX_IS_RUST else '🐍 Python'}  ·  `{DX_CMD[0]}`")
 
     # whether an indexer/refresher is currently running
     proc_running = (

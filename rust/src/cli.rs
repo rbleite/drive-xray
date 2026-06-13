@@ -121,6 +121,8 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Validate a .db index file and report problems.
+    Doctor { db: PathBuf },
     /// List duplicate file groups within a drive (JSON for Streamlit).
     DupGroups {
         db: PathBuf,
@@ -282,6 +284,10 @@ pub fn dispatch() -> anyhow::Result<()> {
             eprintln!("compacting {}", db.display());
             crate::compact::compact(&db)?;
             Ok(())
+        }
+        Command::Doctor { db } => {
+            let ok = crate::doctor::doctor(&db)?;
+            std::process::exit(if ok { 0 } else { 1 });
         }
         Command::DupGroups { db, min_size, json } => {
             crate::dup_groups::run_files(&db, min_size, json)?;
