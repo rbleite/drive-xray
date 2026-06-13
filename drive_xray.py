@@ -550,6 +550,8 @@ def execute_file_action(full_path: str, action: str) -> dict:
 # ---------- central registry ----------
 
 REGISTRY_PATH = Path.home() / ".config" / "drive-xray" / "registry.json"
+CONFIG_PATH = Path.home() / ".config" / "drive-xray" / "config.json"
+_DEFAULT_DB_DIR = Path.home() / "tools" / "drive-xray"
 
 
 def _registry_load() -> dict:
@@ -604,6 +606,70 @@ def registry_remove(db_path: Path) -> None:
     if key in data.get("drives", {}):
         del data["drives"][key]
         _registry_save(data)
+
+
+# ---------- config ----------
+
+def read_config() -> dict:
+    if CONFIG_PATH.exists():
+        try:
+            return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def write_config(data: dict) -> None:
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def get_db_dir() -> Path:
+    """Return the configured .db directory, falling back to the default."""
+    raw = read_config().get("db_dir")
+    if raw:
+        p = Path(raw).expanduser()
+        if p.is_dir() or not p.exists():
+            return p
+    return _DEFAULT_DB_DIR
+
+
+def import_folder(folder: Path) -> list[dict]:
+    """Scan `folder` for .db files and register each in the central registry.
+
+    Returns list of {db, label, root, already_registered} for every valid
+    .db found. Files that can't be opened (corrupt, wrong format) are skipped.
+    """
+    folder = folder.expanduser().resolve()
+    if not folder.is_dir():
+        return []
+    existing = {e["db"].resolve() for e in registry_list()}
+    results = []
+    for db_file in sorted(folder.glob("*.db")):
+        db_file = db_file.resolve()
+        already = db_file in existing
+        try:
+            conn = open_db(db_file)
+            row = conn.execute(
+                "SELECT label, root_path FROM drive LIMIT 1"
+            ).fetchone()
+            conn.close()
+        except Exception:
+            continue
+        if not row:
+            continue
+        label, root = row[0], Path(row[1])
+        if not already:
+            registry_register(db_file, label, root)
+        results.append({
+            "db": db_file,
+            "label": label,
+            "root": root,
+            "already_registered": already,
+        })
+    return results
 
 
 def open_db(db_path: Path) -> sqlite3.Connection:
@@ -1946,6 +2012,19 @@ def main():
 
     sub.add_parser("drives", help="list all drives registered in the central index")
 
+    pif = sub.add_parser(
+        "import-folder",
+        help="scan a folder for .db files and register them in the central index",
+    )
+    pif.add_argument("folder", type=Path, help="folder to scan")
+
+    pcfg = sub.add_parser("config", help="manage drive-xray configuration")
+    pcfg_sub = pcfg.add_subparsers(dest="cfg_cmd")
+    pcfg_sub.add_parser("show", help="show current configuration")
+    pcfg_set = pcfg_sub.add_parser("set-db-dir",
+                                   help="set the folder where .db files are saved")
+    pcfg_set.add_argument("path", type=Path, help="new db folder path")
+
     pxd = sub.add_parser(
         "cross-dedupe",
         help="find duplicate files across multiple drives (works offline)",
@@ -1963,7 +2042,7 @@ def main():
 
     if args.cmd == "index":
         label = args.label or args.root.name
-        db = args.db or Path.home() / "tools" / "drive-xray" / f"{label}.db"
+        db = args.db or get_db_dir() / f"{label}.db"
         db.parent.mkdir(parents=True, exist_ok=True)
         opts = []
         if args.one_filesystem: opts.append("one-filesystem")
@@ -2039,6 +2118,32 @@ def main():
         if fmt not in ("csv", "xlsx"):
             sys.exit(f"cannot infer format from extension {args.out.suffix!r}; use --format")
         export_duplicates(args.db, args.out, fmt, args.min_size)
+    elif args.cmd == "import-folder":
+        results = import_folder(args.folder)
+        new = [r for r in results if not r["already_registered"]]
+        already = [r for r in results if r["already_registered"]]
+        if not results:
+            print(f"  no valid .db files found in {args.folder}")
+        else:
+            if new:
+                print(f"  registered {len(new)} new drive(s):")
+                for r in new:
+                    print(f"    {r['label']:<20}  {r['db']}")
+            if already:
+                print(f"  {len(already)} already registered (skipped):")
+                for r in already:
+                    print(f"    {r['label']:<20}  {r['db']}")
+    elif args.cmd == "config":
+        cfg_cmd = getattr(args, "cfg_cmd", None) or "show"
+        cfg = read_config()
+        if cfg_cmd == "show":
+            print(f"  db_dir: {cfg.get('db_dir', f'{_DEFAULT_DB_DIR}  (default)')}")
+        elif cfg_cmd == "set-db-dir":
+            p = args.path.expanduser().resolve()
+            p.mkdir(parents=True, exist_ok=True)
+            cfg["db_dir"] = str(p)
+            write_config(cfg)
+            print(f"  db_dir set to: {p}")
     elif args.cmd == "drives":
         entries = registry_list()
         if not entries:

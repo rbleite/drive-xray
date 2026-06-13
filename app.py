@@ -29,9 +29,10 @@ from drive_xray import (
     registry_list, registry_remove, registry_register,
     cross_dedupe, read_drive_index_opts,
     verify_file, execute_file_action, QUARANTINE_DIR,
+    read_config, write_config, get_db_dir, import_folder,
 )
 
-DB_DIR = Path.home() / "tools" / "drive-xray"
+DB_DIR = get_db_dir()
 SCRIPT = Path(__file__).parent / "drive_xray.py"
 DB_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -237,6 +238,18 @@ TRANSLATIONS = {
         "diff_net": "Variação líquida",
         "diff_top_growth": "Top pastas por crescimento",
         "diff_top_shrink": "Top pastas por redução",
+        # settings / sync
+        "settings_title": "⚙️ Configurações",
+        "settings_db_dir": "Pasta dos índices (.db)",
+        "settings_db_dir_help": "Pasta onde são guardados os ficheiros .db. Usa uma pasta do OneDrive/Google Drive/Dropbox para partilha automática entre máquinas.",
+        "settings_save": "Guardar",
+        "settings_saved": "✅ Pasta actualizada. A reiniciar…",
+        "settings_invalid": "Pasta inválida ou sem permissão de escrita.",
+        "settings_import_btn": "Importar .db desta pasta",
+        "settings_import_help": "Regista todos os ficheiros .db encontrados na pasta configurada.",
+        "settings_imported": "✅ {n} drive(s) importada(s) · {s} já existiam",
+        "settings_import_none": "Nenhum .db válido encontrado nessa pasta.",
+        "settings_current_dir": "Pasta actual",
     },
     "en": {
         "indexed_drives": "Indexed drives",
@@ -402,6 +415,18 @@ TRANSLATIONS = {
         "diff_net": "Net change",
         "diff_top_growth": "Top folders by growth",
         "diff_top_shrink": "Top folders by shrink",
+        # settings / sync
+        "settings_title": "⚙️ Settings",
+        "settings_db_dir": "Index folder (.db files)",
+        "settings_db_dir_help": "Folder where .db files are saved. Point to a OneDrive/Google Drive/Dropbox folder for automatic multi-machine sync.",
+        "settings_save": "Save",
+        "settings_saved": "✅ Folder updated. Restarting…",
+        "settings_invalid": "Invalid folder or no write permission.",
+        "settings_import_btn": "Import .db files from this folder",
+        "settings_import_help": "Register all valid .db files found in the configured folder.",
+        "settings_imported": "✅ {n} drive(s) imported · {s} already existed",
+        "settings_import_none": "No valid .db files found in that folder.",
+        "settings_current_dir": "Current folder",
     },
 }
 
@@ -850,6 +875,48 @@ with st.sidebar:
         if proc.poll() is None:
             time.sleep(1)
             st.rerun()
+
+    # ---------- settings (db folder / cloud sync) ----------
+    st.divider()
+    with st.expander(t("settings_title")):
+        _cfg = read_config()
+        _cur_dir = str(get_db_dir())
+        st.caption(f"{t('settings_current_dir')}: `{_cur_dir}`")
+
+        _new_dir = st.text_input(
+            t("settings_db_dir"),
+            value=_cur_dir,
+            help=t("settings_db_dir_help"),
+            key="cfg_db_dir_input",
+        )
+        _scol1, _scol2 = st.columns(2)
+        if _scol1.button(t("settings_save"), use_container_width=True,
+                         key="cfg_save_btn"):
+            _p = Path(_new_dir).expanduser()
+            try:
+                _p.mkdir(parents=True, exist_ok=True)
+                _ = (_p / ".dx_write_test").write_text("ok")
+                (_p / ".dx_write_test").unlink(missing_ok=True)
+                _cfg["db_dir"] = str(_p.resolve())
+                write_config(_cfg)
+                st.success(t("settings_saved"))
+                time.sleep(0.8)
+                st.rerun()
+            except Exception:
+                st.error(t("settings_invalid"))
+
+        if _scol2.button(t("settings_import_btn"), use_container_width=True,
+                         key="cfg_import_btn",
+                         help=t("settings_import_help")):
+            _imp = import_folder(Path(_new_dir))
+            _new_count = sum(1 for r in _imp if not r["already_registered"])
+            _old_count = sum(1 for r in _imp if r["already_registered"])
+            if _imp:
+                st.success(t("settings_imported", n=_new_count, s=_old_count))
+                time.sleep(0.8)
+                st.rerun()
+            else:
+                st.warning(t("settings_import_none"))
 
 
 # ---------- pre-delete verification dialog ----------
