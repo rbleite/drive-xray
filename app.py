@@ -168,6 +168,14 @@ TRANSLATIONS = {
         "cleanup_ready": "✅ Plano gerado: {n} acções propostas.",
         "cleanup_download": "⬇️ Descarregar script .sh",
         "cleanup_preview": "Pré-visualizar script",
+        # info / rename
+        "info_tooltip": "Informação e renomear",
+        "drive_info_title": "Informação da drive",
+        "drive_db_path": "Ficheiro .db",
+        "drive_root": "Raiz",
+        "drive_last_indexed": "Última indexação",
+        "rename_label": "Renomear etiqueta",
+        "rename_save": "Guardar",
         # snapshots / history
         "snapshot_tooltip": "Tirar novo snapshot (preserva o histórico anterior)",
         "snapshot_button": "📸 Tirar snapshot",
@@ -286,6 +294,14 @@ TRANSLATIONS = {
         "cleanup_ready": "✅ Plan generated: {n} proposed actions.",
         "cleanup_download": "⬇️ Download .sh script",
         "cleanup_preview": "Preview script",
+        # info / rename
+        "info_tooltip": "Info & rename",
+        "drive_info_title": "Drive info",
+        "drive_db_path": ".db file",
+        "drive_root": "Root",
+        "drive_last_indexed": "Last indexed",
+        "rename_label": "Rename label",
+        "rename_save": "Save",
         # snapshots / history
         "snapshot_tooltip": "Take new snapshot (preserves previous history)",
         "snapshot_button": "📸 Take snapshot",
@@ -609,6 +625,9 @@ def delete_db_files(target: Path) -> None:
 
 # ---------- sidebar ----------
 
+# registry lookup used in both the sidebar loop and the info dialog
+_reg_entries: dict = {e["db"].resolve(): e for e in registry_list()}
+
 with st.sidebar:
     # language toggle
     cur_lang = st.session_state.get("lang", "pt")
@@ -654,10 +673,12 @@ with st.sidebar:
             st.session_state.db_choice_path = current_path
 
         for db in dbs:
-            c1, c2, c3, c4 = st.columns([5, 1, 1, 1])
+            c1, c2, c3, c4, c5 = st.columns([4, 1, 1, 1, 1])
+            _reg = _reg_entries.get(db.resolve(), {})
+            _display_label = _reg.get("label", db.stem)
             is_current = (current_path == str(db))
             if c1.button(
-                ("▶ " if is_current else "   ") + db.stem,
+                ("▶ " if is_current else "   ") + _display_label,
                 key=f"sel_{db}",
                 use_container_width=True,
                 type="primary" if is_current else "secondary",
@@ -665,18 +686,23 @@ with st.sidebar:
                 st.session_state.db_choice_path = str(db)
                 st.rerun()
             if c2.button(
+                "ℹ️", key=f"info_{db}", help=t("info_tooltip"),
+            ):
+                st.session_state.pending_info = str(db)
+                st.rerun()
+            if c3.button(
                 "📸", key=f"snap_{db}", help=t("snapshot_tooltip"),
                 disabled=proc_running,
             ):
                 start_snapshot(db)
                 st.rerun()
-            if c3.button(
+            if c4.button(
                 "🔄", key=f"ref_{db}", help=t("refresh_tooltip"),
                 disabled=proc_running,
             ):
                 start_refresh(db)
                 st.rerun()
-            if c4.button(
+            if c5.button(
                 "🗑️", key=f"del_{db}", help=t("delete_tooltip"),
             ):
                 st.session_state.pending_delete = str(db)
@@ -742,6 +768,41 @@ with st.sidebar:
         if proc.poll() is None:
             time.sleep(1)
             st.rerun()
+
+
+# ---------- info / rename dialog ----------
+
+if "pending_info" in st.session_state:
+    _pending_info = st.session_state["pending_info"]
+
+    @st.dialog(t("drive_info_title"))
+    def _info_dialog():
+        _db = Path(_pending_info)
+        _reg = _reg_entries.get(_db.resolve(), {})
+        st.markdown(f"**{t('drive_db_path')}**")
+        st.code(str(_db), language=None)
+        st.markdown(f"**{t('drive_root')}:** `{_reg.get('root', '?')}`")
+        st.markdown(f"**{t('drive_last_indexed')}:** {_reg.get('last_indexed', '?')}")
+        st.divider()
+        _current = _reg.get("label", _db.stem)
+        _new = st.text_input(t("rename_label"), value=_current, key="rename_inp")
+        rc1, rc2 = st.columns(2)
+        if rc1.button(t("rename_save"), type="primary",
+                      use_container_width=True, key="rename_ok",
+                      disabled=not _new.strip() or _new.strip() == _current):
+            _nl = _new.strip()
+            _conn = open_db(_db)
+            _conn.execute("UPDATE drive SET label = ?", (_nl,))
+            _conn.commit()
+            _conn.close()
+            registry_register(_db, _nl, Path(_reg.get("root", "/")))
+            st.session_state.pop("pending_info", None)
+            st.rerun()
+        if rc2.button(t("cancel"), use_container_width=True, key="rename_cancel"):
+            st.session_state.pop("pending_info", None)
+            st.rerun()
+
+    _info_dialog()
 
 
 # ---------- delete confirmation dialog ----------
