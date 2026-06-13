@@ -69,70 +69,34 @@ def _dx_command_prefix() -> list[str]:
 DX_CMD = _dx_command_prefix()
 DX_IS_RUST = len(DX_CMD) == 1  # heuristic: a single token means a binary
 
+_CACHE_FLOOR = 1048576  # 1 MB floor for dup groups
+
+# One lock per cache key: only one thread computes, others wait.
+# session_state stores the result directly (no pickle copy overhead).
+_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_LOCK = threading.Lock()
+
+
+def _get_lock(key: str) -> threading.Lock:
+    with _LOCKS_LOCK:
+        if key not in _LOCKS:
+            _LOCKS[key] = threading.Lock()
+        return _LOCKS[key]
+
+
+def _ss_compute(key: str, fn):
+    """Return session_state[key], computing via fn() if missing.
+    Thread-safe: only one concurrent caller runs fn(); others wait."""
+    if key in st.session_state:
+        return st.session_state[key]
+    lock = _get_lock(key)
+    with lock:
+        if key not in st.session_state:  # double-check under lock
+            st.session_state[key] = fn()
+    return st.session_state[key]
+
+
 st.set_page_config(page_title="drive-xray", layout="wide", page_icon="💾")
-
-
-# ---------- thread-safe cached computations ----------
-# @st.cache_data has an internal lock: if two Streamlit script threads call the
-# same function with the same args simultaneously, only ONE runs; the other
-# waits and gets the cached result. This prevents the "4 Python at 300% CPU"
-# pattern where concurrent reruns all kick off the same expensive query.
-
-_CACHE_FLOOR = 1048576  # 1 MB — 97-98% of wasted space, 6× fewer objects
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _cached_dup_groups(db_str: str):
-    """Return (file_groups, folder_groups). Runs at most once/hour per DB."""
-    db = Path(db_str)
-    if DX_IS_RUST:
-        rf: list | None = None
-        rd: list | None = None
-
-        def _run_files():
-            nonlocal rf
-            p = subprocess.run(
-                [*DX_CMD, "dup-groups", db_str, "--min-size", str(_CACHE_FLOOR), "--json"],
-                capture_output=True, text=True,
-            )
-            rf = json.loads(p.stdout) if p.returncode == 0 and p.stdout.strip() \
-                 else dup_file_groups(db, _CACHE_FLOOR)
-
-        def _run_folders():
-            nonlocal rd
-            p = subprocess.run(
-                [*DX_CMD, "dup-folders", db_str, "--json"],
-                capture_output=True, text=True,
-            )
-            rd = json.loads(p.stdout) if p.returncode == 0 and p.stdout.strip() \
-                 else dup_folder_groups(db)
-
-        t1 = threading.Thread(target=_run_files)
-        t2 = threading.Thread(target=_run_folders)
-        t1.start(); t2.start()
-        t1.join(); t2.join()
-        return rf, rd
-    return dup_file_groups(db, _CACHE_FLOOR), dup_folder_groups(db)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _cached_ext_breakdown(db_str: str):
-    """Top-20 extensions by size. Runs at most once/hour per DB."""
-    db = Path(db_str)
-    if DX_IS_RUST:
-        p = subprocess.run(
-            [*DX_CMD, "ext-breakdown", db_str, "--limit", "20", "--json"],
-            capture_output=True, text=True,
-        )
-        if p.returncode == 0 and p.stdout.strip():
-            return [(r["ext"], r["files"], r["size_bytes"]) for r in json.loads(p.stdout)]
-    return extension_breakdown(db)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _cached_treemap_pre(db_str: str):
-    """Precompute dir sizes. Runs at most once/hour per DB."""
-    return _treemap_precompute(Path(db_str))
 
 
 # ---------- i18n ----------
@@ -181,6 +145,7 @@ TRANSLATIONS = {
         "drive_not_mounted": "A drive `{root}` não está montada — só vão ser usados hashes já existentes na .db (índices feitos sem `--full` podem ter resultados incompletos).",
         "find_dupes": "Procurar duplicados",
         "calculating": "A calcular…",
+        "load_duplicates": "Procurar duplicados",
         "confirm_expander": "🔬 Confirmar com hash completo (opcional, lento)",
         "confirm_caption": "Lê todos os ficheiros candidatos para confirmar ≈ como = exacto. Pode demorar muito em drives grandes.",
         "confirm_btn": "Confirmar duplicados (lento)",
@@ -361,6 +326,7 @@ TRANSLATIONS = {
         "drive_not_mounted": "Drive `{root}` is not mounted — only hashes already in the .db will be used (indexes built without `--full` may have incomplete results).",
         "find_dupes": "Find duplicates",
         "calculating": "Calculating…",
+        "load_duplicates": "Find duplicates",
         "confirm_expander": "🔬 Confirm with full hash (optional, slow)",
         "confirm_caption": "Reads every candidate file to upgrade ≈ matches to exact =. Can take a long time on large drives.",
         "confirm_btn": "Confirm duplicates (slow)",
@@ -1267,8 +1233,19 @@ with tab_summary:
         start_compact(selected_db)
         st.rerun()
 
+    def _compute_ext():
+        db = selected_db
+        if DX_IS_RUST:
+            p = subprocess.run(
+                [*DX_CMD, "ext-breakdown", str(db), "--limit", "20", "--json"],
+                capture_output=True, text=True,
+            )
+            if p.returncode == 0 and p.stdout.strip():
+                return [(r["ext"], r["files"], r["size_bytes"]) for r in json.loads(p.stdout)]
+        return extension_breakdown(db)
+
     with st.spinner(t("calculating")):
-        ext_rows = _cached_ext_breakdown(str(selected_db))
+        ext_rows = _ss_compute(f"ext_{selected_db}", _compute_ext)
     if ext_rows:
         st.subheader(t("top_ext"))
         st.dataframe(
@@ -1284,8 +1261,44 @@ with tab_dupes:
     if not root_mounted:
         st.info(t("drive_not_mounted", root=str(root_path)))
 
-    with st.spinner(t("calculating")):
-        _all_files, _all_folders = _cached_dup_groups(str(selected_db))
+    _dupes_key = f"dupes_{selected_db}"
+    if _dupes_key not in st.session_state:
+        if st.button(t("load_duplicates"), type="primary", key="btn_load_dupes"):
+            def _compute_dupes():
+                db = selected_db
+                if DX_IS_RUST:
+                    rf: list | None = None
+                    rd: list | None = None
+                    def _rf():
+                        nonlocal rf
+                        p = subprocess.run(
+                            [*DX_CMD, "dup-groups", str(db),
+                             "--min-size", str(_CACHE_FLOOR), "--json"],
+                            capture_output=True, text=True,
+                        )
+                        rf = json.loads(p.stdout) if p.returncode == 0 and p.stdout.strip() \
+                             else dup_file_groups(db, _CACHE_FLOOR)
+                    def _rd():
+                        nonlocal rd
+                        p = subprocess.run(
+                            [*DX_CMD, "dup-folders", str(db), "--json"],
+                            capture_output=True, text=True,
+                        )
+                        rd = json.loads(p.stdout) if p.returncode == 0 and p.stdout.strip() \
+                             else dup_folder_groups(db)
+                    t1 = threading.Thread(target=_rf)
+                    t2 = threading.Thread(target=_rd)
+                    t1.start(); t2.start()
+                    t1.join(); t2.join()
+                    return rf, rd
+                return dup_file_groups(db, _CACHE_FLOOR), dup_folder_groups(db)
+
+            with st.spinner(t("calculating")):
+                st.session_state[_dupes_key] = _ss_compute(_dupes_key, _compute_dupes)
+            st.rerun()
+        st.stop()
+
+    _all_files, _all_folders = st.session_state[_dupes_key]
 
     min_size_mb = st.slider(t("ignore_smaller_mb"), 1, 500, 1)
     min_size = min_size_mb * 1024 * 1024
@@ -1305,7 +1318,7 @@ with tab_dupes:
         with st.expander(t("confirm_expander"), expanded=False):
             st.caption(t("confirm_caption"))
             if st.button(t("confirm_btn"), key="confirm_full_hash_btn"):
-                _cached_dup_groups.clear()
+                st.session_state.pop(_dupes_key, None)
                 with st.status(t("calculating"), expanded=True) as _status:
                     if DX_IS_RUST:
                         st.write(t("confirming_candidates"))
@@ -1525,8 +1538,9 @@ with tab_map:
     map_min = map_min_mb * 1024 * 1024
     map_include_files = st.checkbox(t("map_include_files"), value=False,
                                     key="map_include_files")
+    _map_pre_key = f"map_pre_{selected_db}"
     with st.spinner(t("calculating")):
-        _pre = _cached_treemap_pre(str(selected_db))
+        _pre = _ss_compute(_map_pre_key, lambda: _treemap_precompute(selected_db))
     rows = treemap_rows(selected_db, map_min, map_include_files, _precomputed=_pre)
     if not rows:
         st.info(t("map_empty"))
