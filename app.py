@@ -1153,7 +1153,24 @@ with tab_summary:
         start_compact(selected_db)
         st.rerun()
 
-    ext_rows = extension_breakdown(selected_db)
+    _ext_key = f"ext_breakdown_{selected_db}"
+    if _ext_key not in st.session_state:
+        if DX_IS_RUST:
+            _ep = subprocess.run(
+                [*DX_CMD, "ext-breakdown", str(selected_db),
+                 "--limit", "20", "--json"],
+                capture_output=True, text=True,
+            )
+            if _ep.returncode == 0 and _ep.stdout.strip():
+                _raw = json.loads(_ep.stdout)
+                st.session_state[_ext_key] = [
+                    (r["ext"], r["files"], r["size_bytes"]) for r in _raw
+                ]
+            else:
+                st.session_state[_ext_key] = extension_breakdown(selected_db)
+        else:
+            st.session_state[_ext_key] = extension_breakdown(selected_db)
+    ext_rows = st.session_state[_ext_key]
     if ext_rows:
         st.subheader(t("top_ext"))
         st.dataframe(
