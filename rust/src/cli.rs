@@ -112,6 +112,16 @@ pub enum Command {
     },
     /// VACUUM + WAL checkpoint to shrink the .db file.
     Compact { db: PathBuf },
+    /// Find duplicates across multiple indexed drives.
+    CrossDedupe {
+        /// Paths to .db index files to compare (two or more).
+        dbs: Vec<PathBuf>,
+        #[arg(long, default_value_t = 1048576)]
+        min_size: i64,
+        /// Emit results as a JSON array to stdout (for Streamlit integration).
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -248,6 +258,10 @@ pub fn dispatch() -> anyhow::Result<()> {
         Command::Compact { db } => {
             eprintln!("compacting {}", db.display());
             crate::compact::compact(&db)?;
+            Ok(())
+        }
+        Command::CrossDedupe { dbs, min_size, json } => {
+            crate::cross_dedupe::run(&dbs, min_size, json)?;
             Ok(())
         }
     }

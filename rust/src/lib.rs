@@ -9,6 +9,7 @@
 pub mod cli;
 pub mod compact;
 pub mod compare;
+pub mod cross_dedupe;
 pub mod db;
 pub mod dedupe;
 pub mod export;

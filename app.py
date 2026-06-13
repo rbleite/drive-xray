@@ -5,6 +5,7 @@ Run with:  streamlit run app.py
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
@@ -1537,8 +1538,24 @@ with tab_compare:
             for _db in dbs:
                 _reg = _reg_entries.get(_db.resolve(), {})
                 db_labels.append((_db, _reg.get("label", _db.stem)))
+            _min_size_bytes = min_size_mb_x * 1024 * 1024
             with st.spinner(t("calculating")):
-                _xgroups = cross_dedupe(db_labels, min_size=min_size_mb_x * 1024 * 1024)
+                if DX_IS_RUST:
+                    _proc = subprocess.run(
+                        [*DX_CMD, "cross-dedupe",
+                         "--min-size", str(_min_size_bytes),
+                         "--json"]
+                        + [str(db) for db, _ in db_labels],
+                        capture_output=True, text=True,
+                    )
+                    if _proc.returncode == 0 and _proc.stdout.strip():
+                        _xgroups = json.loads(_proc.stdout)
+                    else:
+                        if _proc.stderr:
+                            st.warning(_proc.stderr[:500])
+                        _xgroups = cross_dedupe(db_labels, min_size=_min_size_bytes)
+                else:
+                    _xgroups = cross_dedupe(db_labels, min_size=_min_size_bytes)
             st.session_state["xdp_groups"] = _xgroups
 
         if "xdp_groups" in st.session_state:

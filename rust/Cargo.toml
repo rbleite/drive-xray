@@ -44,6 +44,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Lossless hex for the dedupe / diff CLI prints
 hex = "0.4"
 
+# JSON serialisation for --json output (cross-dedupe, etc.)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
 # CSV export
 csv = "1.3"
 
