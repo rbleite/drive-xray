@@ -589,46 +589,87 @@ def _hex(b) -> str:
 
 def dup_file_groups(db: Path, min_size: int,
                     snapshot_id: int | None = None) -> list[dict]:
-    """Return groups of duplicate files within one snapshot. Hardlink-aware."""
+    """Return groups of duplicate files within one snapshot. Hardlink-aware.
+
+    Uses partial_hash to find candidates (drive need not be mounted).
+    If all copies have the same full_hash the group is marked confirmed=True (=).
+    If full_hashes differ within a partial_hash group they are NOT duplicates
+    (rare partial collision) and are silently skipped.
+    Groups where some copies lack full_hash are marked confirmed=False (≈).
+    """
     conn = open_db(db)
     sid = snapshot_id if snapshot_id is not None else latest_snapshot_id(conn)
     if sid is None:
         conn.close()
         return []
-    groups = conn.execute(
-        "SELECT full_hash, COUNT(*) c FROM entries"
-        " WHERE snapshot_id=? AND is_dir=0 AND full_hash IS NOT NULL"
-        "   AND size >= ?"
-        " GROUP BY full_hash HAVING c > 1",
+
+    candidates = conn.execute(
+        "SELECT size, partial_hash FROM entries"
+        " WHERE snapshot_id=? AND is_dir=0 AND partial_hash IS NOT NULL AND size>=?"
+        " GROUP BY size, partial_hash HAVING COUNT(*)>1",
         (sid, min_size),
     ).fetchall()
-    out = []
-    for fh, count in groups:
+
+    out: list[dict] = []
+    for size, partial in candidates:
         rows = conn.execute(
-            "SELECT rel_path, size, inode, device FROM entries"
-            " WHERE snapshot_id=? AND full_hash=? AND is_dir=0",
-            (sid, fh),
+            "SELECT rel_path, inode, device, full_hash FROM entries"
+            " WHERE snapshot_id=? AND is_dir=0 AND size=? AND partial_hash=?",
+            (sid, size, partial),
         ).fetchall()
-        size = rows[0][1]
-        # tag hardlinks: a row is a hardlink if an earlier row had the same (ino, dev)
-        seen: set[tuple] = set()
-        paths = []
-        distinct_inodes: set[tuple] = set()
-        for rel, _, ino, dev in rows:
-            key = (ino, dev) if ino is not None else None
-            is_hl = key is not None and key in seen
-            paths.append({"path": rel, "hardlink": is_hl})
-            if key is not None:
-                seen.add(key)
-                distinct_inodes.add(key)
-        distinct = len(distinct_inodes) if distinct_inodes else count
-        wasted = size * (distinct - 1)
-        hardlinks_here = count - distinct if distinct_inodes else 0
-        out.append({
-            "hash": _hex(fh), "count": count, "size": size,
-            "wasted": wasted, "distinct_inodes": distinct,
-            "hardlinks": hardlinks_here, "paths": paths,
-        })
+
+        # inode-dedup: hardlinks share storage, count only once
+        seen_inodes: set[tuple] = set()
+        deduped: list[tuple] = []
+        hardlink_paths: list[str] = []
+        for rel, ino, dev, fh in rows:
+            key = (ino, dev) if ino is not None and dev is not None else None
+            if key and key in seen_inodes:
+                hardlink_paths.append(rel)
+            else:
+                if key:
+                    seen_inodes.add(key)
+                deduped.append((rel, fh))
+
+        if len(deduped) < 2:
+            continue
+
+        fhs = [fh for _, fh in deduped if fh is not None]
+        all_have_fh = len(fhs) == len(deduped)
+
+        if all_have_fh:
+            # sub-group by full_hash: confirmed duplicates only
+            by_fh: dict = defaultdict(list)
+            for rel, fh in deduped:
+                by_fh[fh].append(rel)
+            for fh, grp_paths in by_fh.items():
+                if len(grp_paths) < 2:
+                    continue  # partial collision (different content) — skip
+                wasted = size * (len(grp_paths) - 1)
+                out.append({
+                    "hash": _hex(fh),
+                    "count": len(grp_paths),
+                    "size": size,
+                    "wasted": wasted,
+                    "distinct_inodes": len(grp_paths),
+                    "hardlinks": len(hardlink_paths),
+                    "paths": [{"path": p, "hardlink": False} for p in grp_paths],
+                    "confirmed": True,
+                })
+        else:
+            # not all have full_hash → show as approximate (≈)
+            wasted = size * (len(deduped) - 1)
+            out.append({
+                "hash": _hex(partial),
+                "count": len(deduped),
+                "size": size,
+                "wasted": wasted,
+                "distinct_inodes": len(deduped),
+                "hardlinks": len(hardlink_paths),
+                "paths": [{"path": p, "hardlink": False} for p, _ in deduped],
+                "confirmed": False,
+            })
+
     out.sort(key=lambda g: -g["wasted"])
     conn.close()
     return out
@@ -1108,15 +1149,18 @@ with tab_dupes:
     root_path = Path(info["root"])
     root_mounted = root_path.exists()
     if not root_mounted:
-        st.warning(t("drive_not_mounted", root=str(root_path)))
+        st.info(t("drive_not_mounted", root=str(root_path)))
 
     if st.button(t("find_dupes"), type="primary"):
         with st.status(t("calculating"), expanded=True) as status:
             conn = open_db(selected_db)
             if root_mounted:
+                # confirm candidates: upgrades ≈ → = for files on this drive
                 st.write(t("confirming_candidates"))
                 n = fill_full_hashes(conn, root_path, min_size)
                 st.write(t("files_hashed", n=n))
+            else:
+                st.write("A usar partial_hash (≈) — drive não montada.")
             st.write(t("computing_merkle"))
             compute_dir_hashes(conn)
             conn.close()
@@ -1161,8 +1205,9 @@ with tab_dupes:
         for g in files[:200]:
             hl_tag = (f"  ·  {g['hardlinks']} {t('hardlink_tag')}"
                       if g["hardlinks"] else "")
+            match_tag = "=" if g.get("confirmed") else "≈"
             with st.expander(
-                f"{g['count']}× {human(g['size'])}  ·  "
+                f"{match_tag} {g['count']}× {human(g['size'])}  ·  "
                 f"{t('wasted')} {human(g['wasted'])}{hl_tag}  ·  {g['hash'][:12]}"
             ):
                 for p in g["paths"]:
