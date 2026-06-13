@@ -72,6 +72,69 @@ DX_IS_RUST = len(DX_CMD) == 1  # heuristic: a single token means a binary
 st.set_page_config(page_title="drive-xray", layout="wide", page_icon="💾")
 
 
+# ---------- thread-safe cached computations ----------
+# @st.cache_data has an internal lock: if two Streamlit script threads call the
+# same function with the same args simultaneously, only ONE runs; the other
+# waits and gets the cached result. This prevents the "4 Python at 300% CPU"
+# pattern where concurrent reruns all kick off the same expensive query.
+
+_CACHE_FLOOR = 1048576  # 1 MB — 97-98% of wasted space, 6× fewer objects
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_dup_groups(db_str: str):
+    """Return (file_groups, folder_groups). Runs at most once/hour per DB."""
+    db = Path(db_str)
+    if DX_IS_RUST:
+        rf: list | None = None
+        rd: list | None = None
+
+        def _run_files():
+            nonlocal rf
+            p = subprocess.run(
+                [*DX_CMD, "dup-groups", db_str, "--min-size", str(_CACHE_FLOOR), "--json"],
+                capture_output=True, text=True,
+            )
+            rf = json.loads(p.stdout) if p.returncode == 0 and p.stdout.strip() \
+                 else dup_file_groups(db, _CACHE_FLOOR)
+
+        def _run_folders():
+            nonlocal rd
+            p = subprocess.run(
+                [*DX_CMD, "dup-folders", db_str, "--json"],
+                capture_output=True, text=True,
+            )
+            rd = json.loads(p.stdout) if p.returncode == 0 and p.stdout.strip() \
+                 else dup_folder_groups(db)
+
+        t1 = threading.Thread(target=_run_files)
+        t2 = threading.Thread(target=_run_folders)
+        t1.start(); t2.start()
+        t1.join(); t2.join()
+        return rf, rd
+    return dup_file_groups(db, _CACHE_FLOOR), dup_folder_groups(db)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_ext_breakdown(db_str: str):
+    """Top-20 extensions by size. Runs at most once/hour per DB."""
+    db = Path(db_str)
+    if DX_IS_RUST:
+        p = subprocess.run(
+            [*DX_CMD, "ext-breakdown", db_str, "--limit", "20", "--json"],
+            capture_output=True, text=True,
+        )
+        if p.returncode == 0 and p.stdout.strip():
+            return [(r["ext"], r["files"], r["size_bytes"]) for r in json.loads(p.stdout)]
+    return extension_breakdown(db)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_treemap_pre(db_str: str):
+    """Precompute dir sizes. Runs at most once/hour per DB."""
+    return _treemap_precompute(Path(db_str))
+
+
 # ---------- i18n ----------
 
 TRANSLATIONS = {
@@ -1204,24 +1267,8 @@ with tab_summary:
         start_compact(selected_db)
         st.rerun()
 
-    _ext_key = f"ext_breakdown_{selected_db}"
-    if _ext_key not in st.session_state:
-        if DX_IS_RUST:
-            _ep = subprocess.run(
-                [*DX_CMD, "ext-breakdown", str(selected_db),
-                 "--limit", "20", "--json"],
-                capture_output=True, text=True,
-            )
-            if _ep.returncode == 0 and _ep.stdout.strip():
-                _raw = json.loads(_ep.stdout)
-                st.session_state[_ext_key] = [
-                    (r["ext"], r["files"], r["size_bytes"]) for r in _raw
-                ]
-            else:
-                st.session_state[_ext_key] = extension_breakdown(selected_db)
-        else:
-            st.session_state[_ext_key] = extension_breakdown(selected_db)
-    ext_rows = st.session_state[_ext_key]
+    with st.spinner(t("calculating")):
+        ext_rows = _cached_ext_breakdown(str(selected_db))
     if ext_rows:
         st.subheader(t("top_ext"))
         st.dataframe(
@@ -1237,41 +1284,8 @@ with tab_dupes:
     if not root_mounted:
         st.info(t("drive_not_mounted", root=str(root_path)))
 
-    # 1 MB floor: captures 97-98% of wasted space, 6× fewer Python objects
-    # than a 1 KB floor. Slider starts at 1 MB to match the cache floor.
-    _CACHE_FLOOR = 1048576
-    _cache_key = f"dupes_cache_{selected_db}"
-    if _cache_key not in st.session_state:
-        with st.spinner(t("calculating")):
-            if DX_IS_RUST:
-                import threading as _threading
-                _rf, _rd = [None], [None]
-                def _run_files():
-                    p = subprocess.run(
-                        [*DX_CMD, "dup-groups", str(selected_db),
-                         "--min-size", str(_CACHE_FLOOR), "--json"],
-                        capture_output=True, text=True,
-                    )
-                    _rf[0] = json.loads(p.stdout) if p.returncode == 0 and p.stdout.strip() \
-                              else dup_file_groups(selected_db, _CACHE_FLOOR)
-                def _run_folders():
-                    p = subprocess.run(
-                        [*DX_CMD, "dup-folders", str(selected_db), "--json"],
-                        capture_output=True, text=True,
-                    )
-                    _rd[0] = json.loads(p.stdout) if p.returncode == 0 and p.stdout.strip() \
-                              else dup_folder_groups(selected_db)
-                _t1 = _threading.Thread(target=_run_files)
-                _t2 = _threading.Thread(target=_run_folders)
-                _t1.start(); _t2.start()
-                _t1.join(); _t2.join()
-                st.session_state[_cache_key] = (_rf[0], _rd[0])
-            else:
-                st.session_state[_cache_key] = (
-                    dup_file_groups(selected_db, _CACHE_FLOOR),
-                    dup_folder_groups(selected_db),
-                )
-    _all_files, _all_folders = st.session_state[_cache_key]
+    with st.spinner(t("calculating")):
+        _all_files, _all_folders = _cached_dup_groups(str(selected_db))
 
     min_size_mb = st.slider(t("ignore_smaller_mb"), 1, 500, 1)
     min_size = min_size_mb * 1024 * 1024
@@ -1291,9 +1305,7 @@ with tab_dupes:
         with st.expander(t("confirm_expander"), expanded=False):
             st.caption(t("confirm_caption"))
             if st.button(t("confirm_btn"), key="confirm_full_hash_btn"):
-                for k in list(st.session_state.keys()):
-                    if k.startswith("dupes_cache_"):
-                        del st.session_state[k]
+                _cached_dup_groups.clear()
                 with st.status(t("calculating"), expanded=True) as _status:
                     if DX_IS_RUST:
                         st.write(t("confirming_candidates"))
@@ -1513,13 +1525,9 @@ with tab_map:
     map_min = map_min_mb * 1024 * 1024
     map_include_files = st.checkbox(t("map_include_files"), value=False,
                                     key="map_include_files")
-    # Precompute dirs + sizes ONCE per DB (0.9s), reuse across slider changes
-    _map_key = f"treemap_pre_{selected_db}"
-    if _map_key not in st.session_state:
-        with st.spinner(t("calculating")):
-            st.session_state[_map_key] = _treemap_precompute(selected_db)
-    rows = treemap_rows(selected_db, map_min, map_include_files,
-                        _precomputed=st.session_state[_map_key])
+    with st.spinner(t("calculating")):
+        _pre = _cached_treemap_pre(str(selected_db))
+    rows = treemap_rows(selected_db, map_min, map_include_files, _precomputed=_pre)
     if not rows:
         st.info(t("map_empty"))
     else:
