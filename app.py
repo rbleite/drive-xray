@@ -1159,23 +1159,26 @@ with tab_summary:
 
 # --- Duplicates ---
 with tab_dupes:
-    min_size_mb = st.slider(t("ignore_smaller_mb"), 0, 500, 1)
-    min_size = min_size_mb * 1024 * 1024
-
     root_path = Path(info["root"])
     root_mounted = root_path.exists()
     if not root_mounted:
         st.info(t("drive_not_mounted", root=str(root_path)))
 
-    # Results load immediately using partial_hash (≈) — no button needed.
-    _cache_key = f"dupes_cache_{selected_db}_{min_size}"
+    # Load once with a 1 KB floor — never recompute just because the slider moved.
+    # Slider filters the already-cached list in Python (instant).
+    _cache_key = f"dupes_cache_{selected_db}"
     if _cache_key not in st.session_state:
         with st.spinner(t("calculating")):
             st.session_state[_cache_key] = (
-                dup_file_groups(selected_db, min_size),
+                dup_file_groups(selected_db, 1024),
                 dup_folder_groups(selected_db),
             )
-    files, folders = st.session_state[_cache_key]
+    _all_files, _all_folders = st.session_state[_cache_key]
+
+    min_size_mb = st.slider(t("ignore_smaller_mb"), 0, 500, 1)
+    min_size = min_size_mb * 1024 * 1024
+    files = [g for g in _all_files if g["size"] >= min_size]
+    folders = _all_folders
 
     c1, c2, c3 = st.columns(3)
     c1.metric(t("file_groups"), f"{len(files):,}")
