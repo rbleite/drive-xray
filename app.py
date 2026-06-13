@@ -698,22 +698,27 @@ def dup_folder_groups(db: Path,
     if sid is None:
         conn.close()
         return []
-    groups = conn.execute(
-        "SELECT full_hash, COUNT(*) c FROM entries"
-        " WHERE snapshot_id=? AND is_dir=1 AND full_hash IS NOT NULL"
-        " GROUP BY full_hash HAVING c > 1 ORDER BY c DESC",
-        (sid,),
+    # Single JOIN query — replaces N+1 (one query per group).
+    rows = conn.execute(
+        "SELECT e.full_hash, c.cnt, e.rel_path"
+        " FROM entries e"
+        " JOIN ("
+        "   SELECT full_hash, COUNT(*) cnt FROM entries"
+        "   WHERE snapshot_id=? AND is_dir=1 AND full_hash IS NOT NULL"
+        "   GROUP BY full_hash HAVING cnt > 1"
+        " ) c ON e.full_hash = c.full_hash"
+        " WHERE e.snapshot_id=? AND is_dir=1"
+        " ORDER BY c.cnt DESC, e.full_hash",
+        (sid, sid),
     ).fetchall()
-    out = []
-    for fh, count in groups:
-        paths = [r for (r,) in conn.execute(
-            "SELECT rel_path FROM entries"
-            " WHERE snapshot_id=? AND full_hash=? AND is_dir=1",
-            (sid, fh),
-        )]
-        out.append({"hash": _hex(fh), "count": count, "paths": paths})
     conn.close()
-    return out
+    by_hash: dict = {}
+    for fh, cnt, rel in rows:
+        key = bytes(fh)
+        if key not in by_hash:
+            by_hash[key] = {"hash": _hex(fh), "count": cnt, "paths": []}
+        by_hash[key]["paths"].append(rel)
+    return list(by_hash.values())
 
 
 def extension_breakdown(db: Path, limit: int = 20) -> list[tuple]:
