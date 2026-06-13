@@ -1166,17 +1166,30 @@ with tab_dupes:
             if k.startswith("dupes_cache_"):
                 del st.session_state[k]
         with st.status(t("calculating"), expanded=True) as status:
-            conn = open_db(selected_db)
             if root_mounted:
-                # confirm candidates: upgrades ≈ → = for files on this drive
-                st.write(t("confirming_candidates"))
-                n = fill_full_hashes(conn, root_path, min_size)
-                st.write(t("files_hashed", n=n))
+                if DX_IS_RUST:
+                    # Rust dedupe: fills full_hash via rayon (all cores) +
+                    # computes Merkle dir hashes — writes back to .db in place.
+                    st.write(t("confirming_candidates"))
+                    _proc = subprocess.run(
+                        [*DX_CMD, "dedupe", str(selected_db),
+                         "--min-size", str(min_size)],
+                        capture_output=True, text=True,
+                    )
+                    for line in _proc.stderr.splitlines():
+                        if line.strip():
+                            st.write(line)
+                else:
+                    # Python fallback (single-threaded)
+                    st.write(t("confirming_candidates"))
+                    conn = open_db(selected_db)
+                    n = fill_full_hashes(conn, root_path, min_size)
+                    st.write(t("files_hashed", n=n))
+                    st.write(t("computing_merkle"))
+                    compute_dir_hashes(conn)
+                    conn.close()
             else:
                 st.write("A usar partial_hash (≈) — drive não montada.")
-            st.write(t("computing_merkle"))
-            compute_dir_hashes(conn)
-            conn.close()
             status.update(label=t("done"), state="complete")
         st.session_state["dupes_ready"] = str(selected_db)
 
