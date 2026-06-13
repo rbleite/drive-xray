@@ -139,9 +139,13 @@ pub fn doctor(db_path: &Path) -> Result<bool> {
     if snap_count > 0 {
         let sid: i64 = conn
             .query_row("SELECT id FROM snapshots ORDER BY id DESC LIMIT 1", [], |r| r.get(0))?;
+        // total_files in snapshot metadata counts hashed (non-symlink) files only.
+        // Compare against the same subset to avoid false positives from drives
+        // with many symlinks (symlinks are stored as entries but not hashed).
         let actual_files: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM entries WHERE snapshot_id=? AND is_dir=0",
+                "SELECT COUNT(*) FROM entries \
+                 WHERE snapshot_id=? AND is_dir=0 AND COALESCE(is_symlink,0)=0",
                 params![sid],
                 |r| r.get(0),
             )
@@ -149,6 +153,13 @@ pub fn doctor(db_path: &Path) -> Result<bool> {
         let actual_dirs: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM entries WHERE snapshot_id=? AND is_dir=1",
+                params![sid],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let symlinks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entries WHERE snapshot_id=? AND is_symlink=1",
                 params![sid],
                 |r| r.get(0),
             )
@@ -161,7 +172,8 @@ pub fn doctor(db_path: &Path) -> Result<bool> {
             .unwrap_or(-1);
 
         let detail = format!(
-            "snapshot #{sid}: {actual_files} files / {actual_dirs} dirs (metadata: {meta_files}/{meta_dirs})"
+            "snapshot #{sid}: {actual_files} files / {actual_dirs} dirs / {symlinks} symlinks \
+             (metadata: {meta_files}/{meta_dirs})"
         );
         // Dirs: Python indexer historically skips root dir in metadata — allow ±1.
         // Files: warn if metadata differs >5% from actual (suggests partial/corrupt index).
