@@ -18,6 +18,8 @@ from pathlib import Path
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent))
+import pandas as pd
+
 from drive_xray import (
     open_db, fill_full_hashes, compute_dir_hashes, human,
     get_hash_version, HASH_VERSION, _duplicate_rows,
@@ -25,7 +27,7 @@ from drive_xray import (
     CLEANUP_STRATEGIES, CLEANUP_ACTIONS,
     latest_snapshot_id, list_snapshots, diff_snapshots,
     registry_list, registry_remove, registry_register,
-    cross_dedupe,
+    cross_dedupe, verify_file, execute_file_action, QUARANTINE_DIR,
 )
 
 DB_DIR = Path.home() / "tools" / "drive-xray"
@@ -187,6 +189,25 @@ TRANSLATIONS = {
         "cleanup_ready": "✅ Plano gerado: {n} acções propostas.",
         "cleanup_download": "⬇️ Descarregar script .sh",
         "cleanup_preview": "Pré-visualizar script",
+        # interactive delete
+        "del_title": "🗑️ Apagar seleccionados",
+        "del_caption": "Selecciona as cópias a eliminar (por defeito: mantém o caminho mais curto). Antes de apagar, verifica-se que a cópia a manter ainda existe em disco.",
+        "del_col": "apagar",
+        "del_action_label": "Acção",
+        "del_verify_btn": "Verificar e apagar {n} ficheiro(s) · {size}",
+        "del_none_selected": "Marca pelo menos um ficheiro para apagar.",
+        "del_root_unmounted": "⚠️ Drive não montada — não é possível verificar nem apagar ficheiros.",
+        "del_dialog_title": "Verificação antes de apagar",
+        "del_ok_summary": "✅ {n} grupo(s) verificados · {f} ficheiro(s) · {size} a libertar",
+        "del_no_keeper": "🚫 {n} grupo(s) ignorados — todas as cópias marcadas (ficaria sem nenhuma)",
+        "del_keeper_missing": "⚠️ {n} grupo(s) ignorados — cópia a manter não encontrada em disco",
+        "del_already_gone": "ℹ️ {n} ficheiro(s) já não existem — serão ignorados",
+        "del_nothing_to_do": "Nenhum ficheiro verificado para apagar.",
+        "del_detail": "Ver detalhes por grupo",
+        "del_keeper_label": "manter",
+        "del_execute_btn": "Executar · {n} ficheiro(s) · {size}",
+        "del_done": "✅ {n} ficheiro(s) processados · {size} libertados",
+        "del_errors": "❌ {n} erro(s)",
         # info / rename
         "info_tooltip": "Informação e renomear",
         "drive_info_title": "Informação da drive",
@@ -331,6 +352,25 @@ TRANSLATIONS = {
         "cleanup_ready": "✅ Plan generated: {n} proposed actions.",
         "cleanup_download": "⬇️ Download .sh script",
         "cleanup_preview": "Preview script",
+        # interactive delete
+        "del_title": "🗑️ Delete selected",
+        "del_caption": "Select which copies to remove (default: keep shortest path). Before deleting, the tool verifies the copy to keep still exists on disk.",
+        "del_col": "delete",
+        "del_action_label": "Action",
+        "del_verify_btn": "Verify and delete {n} file(s) · {size}",
+        "del_none_selected": "Mark at least one file for deletion.",
+        "del_root_unmounted": "⚠️ Drive not mounted — cannot verify or delete files.",
+        "del_dialog_title": "Pre-delete verification",
+        "del_ok_summary": "✅ {n} group(s) verified · {f} file(s) · {size} to free",
+        "del_no_keeper": "🚫 {n} group(s) skipped — all copies marked (would leave zero copies)",
+        "del_keeper_missing": "⚠️ {n} group(s) skipped — keeper not found on disk",
+        "del_already_gone": "ℹ️ {n} file(s) already gone — will be skipped",
+        "del_nothing_to_do": "No files verified for deletion.",
+        "del_detail": "Show details per group",
+        "del_keeper_label": "keep",
+        "del_execute_btn": "Execute · {n} file(s) · {size}",
+        "del_done": "✅ {n} file(s) processed · {size} freed",
+        "del_errors": "❌ {n} error(s)",
         # info / rename
         "info_tooltip": "Info & rename",
         "drive_info_title": "Drive info",
@@ -807,6 +847,77 @@ with st.sidebar:
             st.rerun()
 
 
+# ---------- pre-delete verification dialog ----------
+
+if "del_plan" in st.session_state:
+    _dplan = st.session_state["del_plan"]
+    _daction = st.session_state.get("del_action", "quarantine")
+    _droot = Path(st.session_state.get("del_root_path",
+                  st.session_state.get("db_choice_path", "/")))
+
+    @st.dialog(t("del_dialog_title"), width="large")
+    def _del_dialog():
+        _ok_grps   = [g for g in _dplan if g["status"] == "ok"]
+        _no_keeper = [g for g in _dplan if g["status"] == "no_keeper"]
+        _miss      = [g for g in _dplan if g["status"] == "keeper_missing"]
+        _exec_files = [d for g in _ok_grps for d in g["to_delete"] if d["exists"]]
+        _gone_files = [d for g in _ok_grps for d in g["to_delete"] if not d["exists"]]
+        _bytes_free = sum(d["size"] for d in _exec_files)
+
+        if _exec_files:
+            st.success(t("del_ok_summary", n=len(_ok_grps),
+                         f=len(_exec_files), size=human(_bytes_free)))
+        if _no_keeper:
+            st.error(t("del_no_keeper", n=len(_no_keeper)))
+        if _miss:
+            st.warning(t("del_keeper_missing", n=len(_miss)))
+        if _gone_files:
+            st.info(t("del_already_gone", n=len(_gone_files)))
+
+        with st.expander(t("del_detail"), expanded=len(_ok_grps) <= 10):
+            for _g in _ok_grps:
+                _k = _g["keeper"]
+                _ico = "✅" if _k["ok"] else "⚠️"
+                st.markdown(
+                    f"**#{_g['group']}** — {_ico} `{_k['path']}` "
+                    f"*({t('del_keeper_label')})*"
+                )
+                for _d in _g["to_delete"]:
+                    _di = "🗑️" if _d["exists"] else "👻"
+                    st.markdown(f"  {_di} `{_d['path']}`"
+                                + ("" if _d["exists"] else " *(já eliminado)*"))
+
+        if not _exec_files:
+            st.warning(t("del_nothing_to_do"))
+            if st.button(t("cancel"), use_container_width=True, key="dd_cancel"):
+                st.session_state.pop("del_plan", None)
+                st.rerun()
+        else:
+            c1, c2 = st.columns(2)
+            if c1.button(t("cancel"), use_container_width=True, key="dd_cancel"):
+                st.session_state.pop("del_plan", None)
+                st.rerun()
+            if c2.button(
+                t("del_execute_btn", n=len(_exec_files), size=human(_bytes_free)),
+                type="primary", use_container_width=True, key="dd_exec",
+            ):
+                _results = [execute_file_action(d["full_path"], _daction)
+                            for d in _exec_files]
+                _ok_count = sum(1 for r in _results if r["ok"])
+                _freed = sum(d["size"] for d, r in zip(_exec_files, _results)
+                             if r["ok"])
+                st.session_state["del_result"] = {
+                    "ok": _ok_count,
+                    "freed_bytes": _freed,
+                    "errors": [r for r in _results if not r["ok"]],
+                }
+                st.session_state.pop("del_plan", None)
+                st.session_state.pop("dupes_ready", None)  # force re-scan
+                st.rerun()
+
+    _del_dialog()
+
+
 # ---------- info / rename dialog ----------
 
 if "pending_info" in st.session_state:
@@ -997,6 +1108,111 @@ with tab_dupes:
                     st.code(p + "/", language=None)
         if len(folders) > 100:
             st.caption(t("groups_not_shown", n=len(folders) - 100))
+
+        # ----- Interactive delete -----
+        st.divider()
+        st.subheader(t("del_title"))
+        st.caption(t("del_caption"))
+
+        if not root_mounted:
+            st.warning(t("del_root_unmounted"))
+        elif files:
+            # Build editor dataframe — cap at 200 groups (same as display)
+            _del_rows = []
+            for _gi, _g in enumerate(files[:200], 1):
+                _sorted_paths = sorted(_g["paths"], key=lambda p: len(p["path"]))
+                for _pi, _p in enumerate(_sorted_paths):
+                    _del_rows.append({
+                        t("del_col"): _pi > 0,      # keep shortest, mark rest
+                        "#": _gi,
+                        t("cross_col_size"): human(_g["size"]),
+                        t("cross_col_path"): _p["path"],
+                        "_size": _g["size"],
+                    })
+            _del_df = pd.DataFrame(_del_rows)
+            _edited = st.data_editor(
+                _del_df,
+                column_config={
+                    t("del_col"): st.column_config.CheckboxColumn(
+                        t("del_col"), default=False),
+                    "#": st.column_config.NumberColumn(
+                        "#", disabled=True, width="small"),
+                    t("cross_col_size"): st.column_config.TextColumn(
+                        t("cross_col_size"), disabled=True, width="small"),
+                    t("cross_col_path"): st.column_config.TextColumn(
+                        t("cross_col_path"), disabled=True, width="large"),
+                    "_size": None,
+                },
+                disabled=["#", t("cross_col_size"), t("cross_col_path")],
+                hide_index=True,
+                use_container_width=True,
+                key="del_editor",
+            )
+
+            _del_action = st.selectbox(
+                t("del_action_label"),
+                options=list(CLEANUP_ACTIONS),
+                format_func=lambda a: t(f"action_{a}"),
+                key="del_action_sel",
+            )
+
+            _marked = _edited[_edited[t("del_col")] == True]
+            _n_marked = len(_marked)
+            _bytes_marked = int(_marked["_size"].sum()) if _n_marked else 0
+
+            if _n_marked == 0:
+                st.caption(t("del_none_selected"))
+            else:
+                if st.button(
+                    t("del_verify_btn", n=_n_marked, size=human(_bytes_marked)),
+                    type="primary", key="del_verify_btn",
+                ):
+                    _plan = []
+                    for _gid in _marked["#"].unique():
+                        _gdf = _edited[_edited["#"] == _gid]
+                        _keepers = _gdf[_gdf[t("del_col")] == False]
+                        _to_del = _gdf[_gdf[t("del_col")] == True]
+
+                        if _keepers.empty:
+                            _plan.append({"group": int(_gid),
+                                          "status": "no_keeper",
+                                          "keeper": None, "to_delete": []})
+                            continue
+
+                        _kr = _keepers.iloc[0]
+                        _kcheck = verify_file(
+                            root_path, _kr[t("cross_col_path")], int(_kr["_size"]))
+                        _del_checks = []
+                        for _, _dr in _to_del.iterrows():
+                            _dc = verify_file(
+                                root_path, _dr[t("cross_col_path")], int(_dr["_size"]))
+                            _del_checks.append({
+                                "path": _dr[t("cross_col_path")],
+                                "full_path": _dc["full_path"],
+                                "exists": _dc["ok"],
+                                "size": int(_dr["_size"]),
+                            })
+                        _plan.append({
+                            "group": int(_gid),
+                            "status": "ok" if _kcheck["ok"] else "keeper_missing",
+                            "keeper": {"path": _kr[t("cross_col_path")],
+                                       "full_path": _kcheck["full_path"],
+                                       "ok": _kcheck["ok"],
+                                       "reason": _kcheck["reason"]},
+                            "to_delete": _del_checks,
+                        })
+                    st.session_state["del_plan"] = _plan
+                    st.session_state["del_action"] = _del_action
+                    st.session_state["del_root_path"] = str(root_path)
+                    st.rerun()
+
+        # show execution result banner
+        if "del_result" in st.session_state:
+            _res = st.session_state.pop("del_result")
+            st.success(t("del_done", n=_res["ok"],
+                         size=human(_res["freed_bytes"])))
+            if _res["errors"]:
+                st.error(t("del_errors", n=len(_res["errors"])))
 
         # ----- Assisted cleanup -----
         st.divider()

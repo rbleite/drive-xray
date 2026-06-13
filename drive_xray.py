@@ -27,6 +27,7 @@ import datetime
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import stat
 import sys
@@ -492,6 +493,58 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> bool:
     print(f"    interned {n} entries in {time.time()-t0:.1f}s",
           file=sys.stderr)
     return True
+
+
+QUARANTINE_DIR = Path.home() / ".drive-xray-quarantine"
+
+
+def verify_file(root_path: Path, rel_path: str, expected_size: int) -> dict:
+    """Check a file still exists on disk with the expected size.
+
+    Returns {"ok": bool, "full_path": str, "reason": str | None}.
+    `reason` is None on success; otherwise "not_found" or "size_mismatch …".
+    """
+    full = root_path / rel_path
+    try:
+        st_result = full.stat()
+    except FileNotFoundError:
+        return {"ok": False, "full_path": str(full), "reason": "not_found"}
+    except Exception as exc:
+        return {"ok": False, "full_path": str(full), "reason": str(exc)}
+    if st_result.st_size != expected_size:
+        return {
+            "ok": False,
+            "full_path": str(full),
+            "reason": (
+                f"size_mismatch (db={expected_size}, disk={st_result.st_size})"
+            ),
+        }
+    return {"ok": True, "full_path": str(full), "reason": None}
+
+
+def execute_file_action(full_path: str, action: str) -> dict:
+    """Move a file to quarantine or delete it permanently.
+
+    action: "quarantine" | "delete"
+    Returns {"ok": bool, "full_path": str, "dest": str | None, "error": str | None}.
+    """
+    p = Path(full_path)
+    if not p.exists():
+        return {"ok": False, "full_path": full_path, "dest": None,
+                "error": "not_found"}
+    try:
+        if action == "quarantine":
+            QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+            dest = QUARANTINE_DIR / p.name
+            if dest.exists():
+                dest = QUARANTINE_DIR / f"{p.stem}_{int(time.time())}{p.suffix}"
+            shutil.move(str(p), str(dest))
+            return {"ok": True, "full_path": full_path, "dest": str(dest), "error": None}
+        else:
+            p.unlink()
+            return {"ok": True, "full_path": full_path, "dest": None, "error": None}
+    except Exception as exc:
+        return {"ok": False, "full_path": full_path, "dest": None, "error": str(exc)}
 
 
 # ---------- central registry ----------
