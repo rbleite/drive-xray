@@ -2054,7 +2054,11 @@ def main():
         print(f"indexing {args.root} → {db}{suffix}", file=sys.stderr)
         index_drive(args.root, db, label, args.full,
                     one_fs=args.one_filesystem, skip_cloud=args.skip_cloud)
-        registry_register(db, label, args.root)
+        # Only auto-register when --db was NOT specified explicitly (i.e. the
+        # app chose the path inside DB_DIR). An explicit --db path is managed
+        # by the caller (tests, scripts) and must not pollute the registry.
+        if args.db is None:
+            registry_register(db, label, args.root)
     elif args.cmd == "dedupe":
         dedupe(args.db, args.min_size, args.mode)
     elif args.cmd == "compare":
