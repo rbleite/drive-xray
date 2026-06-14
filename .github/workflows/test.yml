@@ -14,14 +14,14 @@ concurrency:
 
 jobs:
   rust:
-    name: cargo test (rust ${{ matrix.os }})
+    name: cargo test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # We support both Apple Silicon and Intel via the universal binary.
-        # macos-14 = arm64, macos-13 = x86_64.
-        os: [macos-14, macos-13]
+        # macos-14 = arm64 (Apple Silicon), macos-13 = x86_64 (Intel),
+        # windows-latest = x86_64-pc-windows-msvc (AVX2 blake2b_simd).
+        os: [macos-14, macos-13, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -47,7 +47,10 @@ jobs:
                        --skip python_db_opens_in_rust_dedupe
 
       - name: dx --version sanity
-        run: ./rust/target/release/dx --version
+        shell: bash
+        run: |
+          [ "$RUNNER_OS" = "Windows" ] && EXT=".exe" || EXT=""
+          "./rust/target/release/dx${EXT}" --version
 
   parity:
     name: parity Python ↔ Rust

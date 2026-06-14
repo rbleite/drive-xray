@@ -548,12 +548,18 @@ def execute_file_action(
     Returns {"ok": bool, "full_path": str, "dest": str | None, "error": str | None}.
     Every completed action (ok or error) is appended to AUDIT_LOG.
     """
-    p = Path(full_path).resolve()
+    # Use the original path for all file operations (do NOT resolve — symlinks in
+    # /Volumes/... on macOS resolve to internal paths that break the containment check
+    # and would operate on the symlink *target* instead of the entry itself).
+    p = Path(full_path)
 
-    # Containment check — reject paths that escape the drive root
+    # Containment check — os.path.abspath normalises without following symlinks,
+    # so /Volumes/DriveName/file stays under /Volumes/DriveName even on macOS.
     if root_path is not None:
+        p_abs   = Path(os.path.abspath(full_path))
+        root_abs = Path(os.path.abspath(str(root_path)))
         try:
-            p.relative_to(root_path.resolve())
+            p_abs.relative_to(root_abs)
         except ValueError:
             result = {
                 "ok": False, "full_path": full_path, "dest": None,
@@ -566,7 +572,7 @@ def execute_file_action(
             })
             return result
 
-    if not p.exists():
+    if not p.exists() and not p.is_symlink():
         result = {"ok": False, "full_path": full_path, "dest": None,
                   "error": "not_found"}
         _append_audit({
@@ -961,19 +967,22 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
         # prune APFS firmlinks: skip any subdir whose (inode, device) was
         # already visited — these are the same physical directory reachable
         # via two paths (e.g. /Users and /System/Volumes/Data/Users).
-        kept2 = []
-        for d in dirnames:
-            try:
-                _dstat = (dp / d).lstat()
-                _dkey = (_dstat.st_ino, _dstat.st_dev)
-                if _dkey in _visited_dir_inodes:
-                    firmlinks_skipped += 1
-                else:
-                    _visited_dir_inodes.add(_dkey)
+        # Skipped on Windows: st_dev is 0 for all NTFS entries, making the
+        # (inode, device) key unreliable and causing false positives.
+        if os.name != 'nt':
+            kept2 = []
+            for d in dirnames:
+                try:
+                    _dstat = (dp / d).lstat()
+                    _dkey = (_dstat.st_ino, _dstat.st_dev)
+                    if _dkey in _visited_dir_inodes:
+                        firmlinks_skipped += 1
+                    else:
+                        _visited_dir_inodes.add(_dkey)
+                        kept2.append(d)
+                except OSError:
                     kept2.append(d)
-            except OSError:
-                kept2.append(d)
-        dirnames[:] = kept2
+            dirnames[:] = kept2
         rel_dir = str(dp.relative_to(root)) if dp != root else "."
         parent_id = parent_id_by_rel.get(rel_dir)
 
@@ -982,7 +991,9 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
             rel = str(full_p.relative_to(root))
             try:
                 st = full_p.lstat()
-                is_link = stat.S_ISLNK(st.st_mode)
+                # Path.is_symlink() detects NTFS junctions on Windows;
+                # stat.S_ISLNK() misses them on Python < 3.12.
+                is_link = full_p.is_symlink()
                 sub_id = insert(rel, parent_id, True, None, st.st_mtime,
                                 None, None, is_link, None,
                                 st.st_ino, st.st_dev)
@@ -1001,7 +1012,7 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
                 insert(rel, parent_id, False, None, None, None, None,
                        False, str(e))
                 continue
-            is_link = stat.S_ISLNK(st.st_mode)
+            is_link = full_p.is_symlink()  # handles NTFS junctions on Windows
             if is_link:
                 insert(rel, parent_id, False, 0, st.st_mtime, None, None,
                        True, None, st.st_ino, st.st_dev)
@@ -1300,7 +1311,9 @@ def _read_drive_and_cache(db_path: Path) -> tuple[Path, str, bool, bool, dict, i
     root = Path(root_path)
     if not root.is_dir():
         sys.exit(f"root {root} not mounted or not a directory")
-    one_fs = bool(opt_one_fs) if opt_one_fs is not None else True
+    # Default one_fs=True on macOS/Linux (meaningful); False on Windows where
+    # st_dev is 0 for all NTFS entries and the check would cross or block all mounts.
+    one_fs = bool(opt_one_fs) if opt_one_fs is not None else (os.name != 'nt')
     skip_cloud = bool(opt_skip_cloud) if opt_skip_cloud is not None else True
     latest_sid = latest_snapshot_id(conn)
     old: dict[str, tuple] = {}
