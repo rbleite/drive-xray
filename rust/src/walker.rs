@@ -9,8 +9,18 @@
 
 use anyhow::Result;
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
+// On Windows we use std::os::windows::fs::MetadataExt only for last_write_time
+// (mtime), which is stable. For inode and device we call GetFileInformationByHandle
+// via a raw winapi shim so we don't need the unstable `windows_by_handle` feature.
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt; // only last_write_time() used — stable
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt; // custom_flags() for FILE_FLAG_BACKUP_SEMANTICS
 
 /// Skip-list — must match `SKIP_DIR_NAMES` in `drive_xray.py`.
 pub const SKIP_DIR_NAMES: &[&str] = &[
@@ -59,9 +69,98 @@ pub struct WalkResult {
     pub stats: WalkStats,
 }
 
-/// Combine mtime seconds + nanos into the float seconds Python stores.
+/// Combine mtime into float seconds-since-Unix-epoch, matching Python's float.
+#[cfg(unix)]
 fn unix_mtime(md: &fs::Metadata) -> f64 {
     md.mtime() as f64 + md.mtime_nsec() as f64 * 1e-9
+}
+
+/// On Windows, `last_write_time()` returns a FILETIME (100-ns intervals since
+/// 1601-01-01 UTC). Convert to Unix epoch seconds to match the Python value.
+#[cfg(windows)]
+fn unix_mtime(md: &fs::Metadata) -> f64 {
+    // Seconds between 1601-01-01 and 1970-01-01
+    const EPOCH_DIFF_SECS: u64 = 11_644_473_600;
+    let ft = md.last_write_time(); // 100-ns ticks since 1601
+    let secs = ft / 10_000_000;
+    let subsec = (ft % 10_000_000) as f64 * 1e-7;
+    (secs.saturating_sub(EPOCH_DIFF_SECS)) as f64 + subsec
+}
+
+/// Device ID: volume serial number on Windows, st_dev on Unix.
+#[cfg(unix)]
+fn meta_dev(md: &fs::Metadata) -> u64 { md.dev() }
+#[cfg(windows)]
+fn meta_dev(_md: &fs::Metadata) -> u64 {
+    // volume_serial_number() requires unstable `windows_by_handle`.
+    // For one_fs enforcement we use win_file_info() below instead.
+    // Returning 0 here means meta_dev is only called where win_file_info
+    // already handles the one_fs check — this value is stored in the DB
+    // purely for informational purposes.
+    0
+}
+
+/// Inode: file index on Windows, st_ino on Unix.
+#[cfg(unix)]
+fn meta_ino(md: &fs::Metadata) -> u64 { md.ino() }
+#[cfg(windows)]
+fn meta_ino(_md: &fs::Metadata) -> u64 {
+    // file_index() requires unstable `windows_by_handle`.
+    // Inode is used for hardlink dedup on Unix; on Windows we store 0.
+    0
+}
+
+/// File size — `std::fs::Metadata::len()` is stable and cross-platform.
+fn meta_size(md: &fs::Metadata) -> u64 { md.len() }
+
+/// On Windows, obtain (volume_serial, file_index) by opening the file and
+/// calling GetFileInformationByHandle. This avoids the unstable
+/// `windows_by_handle` feature while giving us stable inode + device values
+/// for one_fs checks and hardlink detection.
+#[cfg(windows)]
+fn win_file_info(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use std::fs::OpenOptions;
+
+    // Open without read permission — we only need the handle for metadata.
+    let f = OpenOptions::new()
+        .read(true)
+        .custom_flags(0x0200_0000) // FILE_FLAG_BACKUP_SEMANTICS — needed for dirs
+        .open(path)
+        .ok()?;
+
+    // SAFETY: GetFileInformationByHandle is a simple FFI call with a valid
+    // handle and a stack-allocated output struct.
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct BY_HANDLE_FILE_INFORMATION {
+        dwFileAttributes: u32,
+        ftCreationTime: [u32; 2],
+        ftLastAccessTime: [u32; 2],
+        ftLastWriteTime: [u32; 2],
+        dwVolumeSerialNumber: u32,
+        nFileSizeHigh: u32,
+        nFileSizeLow: u32,
+        nNumberOfLinks: u32,
+        nFileIndexHigh: u32,
+        nFileIndexLow: u32,
+    }
+    extern "system" {
+        fn GetFileInformationByHandle(
+            hFile: *mut std::ffi::c_void,
+            lpFileInformation: *mut BY_HANDLE_FILE_INFORMATION,
+        ) -> i32;
+    }
+
+    let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    let ok = unsafe {
+        GetFileInformationByHandle(f.as_raw_handle() as *mut _, info.as_mut_ptr())
+    };
+    if ok == 0 { return None; }
+    let info = unsafe { info.assume_init() };
+    let serial = info.dwVolumeSerialNumber as u64;
+    let index = ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
+    Some((serial, index))
 }
 
 /// Walk `root` synchronously, applying our filters. Returns entries in
@@ -73,7 +172,10 @@ pub fn walk(root: &Path, one_fs: bool, skip_cloud: bool) -> Result<WalkResult> {
     if !root_md.is_dir() {
         anyhow::bail!("not a directory: {}", root.display());
     }
-    let root_dev = root_md.dev();
+    #[cfg(unix)]
+    let root_dev = meta_dev(&root_md);
+    #[cfg(windows)]
+    let root_dev: u64 = win_file_info(&root).map(|(s, _)| s).unwrap_or(0);
 
     let mut entries: Vec<RawEntry> = Vec::new();
     let mut stats = WalkStats::default();
@@ -162,7 +264,12 @@ pub fn walk(root: &Path, one_fs: bool, skip_cloud: bool) -> Result<WalkResult> {
                     continue;
                 }
                 // -x: don't cross mount points / APFS firmlinks.
-                if one_fs && st.dev() != root_dev {
+                #[cfg(unix)]
+                let (dir_dev, dir_ino) = (meta_dev(&st), meta_ino(&st));
+                #[cfg(windows)]
+                let (dir_dev, dir_ino) = win_file_info(&abs).unwrap_or((0, 0));
+
+                if one_fs && dir_dev != root_dev {
                     stats.crossed += 1;
                     continue;
                 }
@@ -174,13 +281,17 @@ pub fn walk(root: &Path, one_fs: bool, skip_cloud: bool) -> Result<WalkResult> {
                     is_symlink: false,
                     size: None,
                     mtime: Some(unix_mtime(&st)),
-                    inode: Some(st.ino()),
-                    device: Some(st.dev()),
+                    inode: Some(dir_ino),
+                    device: Some(dir_dev),
                     error: None,
                 });
                 subdirs_to_recurse.push((abs, rel));
             } else if is_link {
                 // Record as a 0-size file-like entry, but mark is_symlink.
+                #[cfg(unix)]
+                let (lnk_dev, lnk_ino) = (meta_dev(&st), meta_ino(&st));
+                #[cfg(windows)]
+                let (lnk_dev, lnk_ino) = win_file_info(&abs).unwrap_or((0, 0));
                 entries.push(RawEntry {
                     rel_path: rel,
                     parent_rel: Some(rel_dir.clone()),
@@ -188,20 +299,24 @@ pub fn walk(root: &Path, one_fs: bool, skip_cloud: bool) -> Result<WalkResult> {
                     is_symlink: true,
                     size: Some(0),
                     mtime: Some(unix_mtime(&st)),
-                    inode: Some(st.ino()),
-                    device: Some(st.dev()),
+                    inode: Some(lnk_ino),
+                    device: Some(lnk_dev),
                     error: None,
                 });
             } else if ft.is_file() {
+                #[cfg(unix)]
+                let (file_dev, file_ino) = (meta_dev(&st), meta_ino(&st));
+                #[cfg(windows)]
+                let (file_dev, file_ino) = win_file_info(&abs).unwrap_or((0, 0));
                 entries.push(RawEntry {
                     rel_path: rel,
                     parent_rel: Some(rel_dir.clone()),
                     is_dir: false,
                     is_symlink: false,
-                    size: Some(st.size()),
+                    size: Some(meta_size(&st)),
                     mtime: Some(unix_mtime(&st)),
-                    inode: Some(st.ino()),
-                    device: Some(st.dev()),
+                    inode: Some(file_ino),
+                    device: Some(file_dev),
                     error: None,
                 });
             }
