@@ -1302,240 +1302,239 @@ with tab_dupes:
             with st.spinner(t("calculating")):
                 st.session_state[_dupes_key] = _ss_compute(_dupes_key, _compute_dupes)
             st.rerun()
-        st.stop()
+    else:
+        _all_files, _all_folders = st.session_state[_dupes_key]
 
-    _all_files, _all_folders = st.session_state[_dupes_key]
+        min_size_mb = st.slider(t("ignore_smaller_mb"), 1, 500, 1)
+        min_size = min_size_mb * 1024 * 1024
+        files = [g for g in _all_files if g["size"] >= min_size]
+        folders = _all_folders
 
-    min_size_mb = st.slider(t("ignore_smaller_mb"), 1, 500, 1)
-    min_size = min_size_mb * 1024 * 1024
-    files = [g for g in _all_files if g["size"] >= min_size]
-    folders = _all_folders
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric(t("file_groups"), f"{len(files):,}")
-    c2.metric(t("folder_groups"), f"{len(folders):,}")
-    c3.metric(
-        t("wasted_space"),
-        human(sum(g["wasted"] for g in files)),
-    )
-
-    # Optional: confirm approximate matches with full hash (slow)
-    if root_mounted:
-        with st.expander(t("confirm_expander"), expanded=False):
-            st.caption(t("confirm_caption"))
-            if st.button(t("confirm_btn"), key="confirm_full_hash_btn"):
-                st.session_state.pop(_dupes_key, None)
-                with st.status(t("calculating"), expanded=True) as _status:
-                    if DX_IS_RUST:
-                        st.write(t("confirming_candidates"))
-                        _proc = subprocess.run(
-                            [*DX_CMD, "dedupe", str(selected_db),
-                             "--min-size", str(min_size)],
-                            capture_output=True, text=True,
-                        )
-                        for line in _proc.stderr.splitlines():
-                            if line.strip():
-                                st.write(line)
-                    else:
-                        conn = open_db(selected_db)
-                        n = fill_full_hashes(conn, root_path, min_size)
-                        st.write(t("files_hashed", n=n))
-                        st.write(t("computing_merkle"))
-                        compute_dir_hashes(conn)
-                        conn.close()
-                    _status.update(label=t("done"), state="complete")
-                st.rerun()
-
-    # export buttons
-    if files:
-        conn = open_db(selected_db)
-        export_rows = _duplicate_rows(conn, min_size)
-        conn.close()
-        ec1, ec2 = st.columns(2)
-        ec1.download_button(
-            t("download_csv"),
-            data=build_csv(export_rows),
-            file_name=f"{selected_db.stem}-duplicates.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-        ec2.download_button(
-            t("download_xlsx"),
-            data=build_xlsx(export_rows),
-            file_name=f"{selected_db.stem}-duplicates.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+        c1, c2, c3 = st.columns(3)
+        c1.metric(t("file_groups"), f"{len(files):,}")
+        c2.metric(t("folder_groups"), f"{len(folders):,}")
+        c3.metric(
+            t("wasted_space"),
+            human(sum(g["wasted"] for g in files)),
         )
 
-    st.subheader(t("duplicate_files"))
-    st.caption(t("sorted_top200"))
-    for g in files[:200]:
-        hl_tag = (f"  ·  {g['hardlinks']} {t('hardlink_tag')}"
-                  if g["hardlinks"] else "")
-        match_tag = "=" if g.get("confirmed") else "≈"
-        with st.expander(
-            f"{match_tag} {g['count']}× {human(g['size'])}  ·  "
-            f"{t('wasted')} {human(g['wasted'])}{hl_tag}  ·  {g['hash'][:12]}"
-        ):
-            for p in g["paths"]:
-                suffix = f"   ← {t('hardlink_tag')}" if p["hardlink"] else ""
-                st.code(p["path"] + suffix, language=None)
-    if len(files) > 200:
-        st.caption(t("groups_not_shown", n=len(files) - 200))
+        # Optional: confirm approximate matches with full hash (slow)
+        if root_mounted:
+            with st.expander(t("confirm_expander"), expanded=False):
+                st.caption(t("confirm_caption"))
+                if st.button(t("confirm_btn"), key="confirm_full_hash_btn"):
+                    st.session_state.pop(_dupes_key, None)
+                    with st.status(t("calculating"), expanded=True) as _status:
+                        if DX_IS_RUST:
+                            st.write(t("confirming_candidates"))
+                            _proc = subprocess.run(
+                                [*DX_CMD, "dedupe", str(selected_db),
+                                 "--min-size", str(min_size)],
+                                capture_output=True, text=True,
+                            )
+                            for line in _proc.stderr.splitlines():
+                                if line.strip():
+                                    st.write(line)
+                        else:
+                            conn = open_db(selected_db)
+                            n = fill_full_hashes(conn, root_path, min_size)
+                            st.write(t("files_hashed", n=n))
+                            st.write(t("computing_merkle"))
+                            compute_dir_hashes(conn)
+                            conn.close()
+                        _status.update(label=t("done"), state="complete")
+                    st.rerun()
 
-    st.subheader(t("duplicate_folders"))
-    for g in folders[:100]:
-        with st.expander(
-            f"{g['count']}× {t('identical_folders')}  ·  {g['hash'][:12]}"
-        ):
-            for p in g["paths"]:
-                st.code(p + "/", language=None)
-    if len(folders) > 100:
-        st.caption(t("groups_not_shown", n=len(folders) - 100))
+        # export buttons
+        if files:
+            conn = open_db(selected_db)
+            export_rows = _duplicate_rows(conn, min_size)
+            conn.close()
+            ec1, ec2 = st.columns(2)
+            ec1.download_button(
+                t("download_csv"),
+                data=build_csv(export_rows),
+                file_name=f"{selected_db.stem}-duplicates.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+            ec2.download_button(
+                t("download_xlsx"),
+                data=build_xlsx(export_rows),
+                file_name=f"{selected_db.stem}-duplicates.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
-    # ----- Interactive delete -----
-    st.divider()
-    st.subheader(t("del_title"))
-    st.caption(t("del_caption"))
+        st.subheader(t("duplicate_files"))
+        st.caption(t("sorted_top200"))
+        for g in files[:200]:
+            hl_tag = (f"  ·  {g['hardlinks']} {t('hardlink_tag')}"
+                      if g["hardlinks"] else "")
+            match_tag = "=" if g.get("confirmed") else "≈"
+            with st.expander(
+                f"{match_tag} {g['count']}× {human(g['size'])}  ·  "
+                f"{t('wasted')} {human(g['wasted'])}{hl_tag}  ·  {g['hash'][:12]}"
+            ):
+                for p in g["paths"]:
+                    suffix = f"   ← {t('hardlink_tag')}" if p["hardlink"] else ""
+                    st.code(p["path"] + suffix, language=None)
+        if len(files) > 200:
+            st.caption(t("groups_not_shown", n=len(files) - 200))
 
-    if not root_mounted:
-        st.warning(t("del_root_unmounted"))
-    elif files:
-        # Build editor dataframe — cap at 200 groups (same as display)
-        _del_rows = []
-        for _gi, _g in enumerate(files[:200], 1):
-            _sorted_paths = sorted(_g["paths"], key=lambda p: len(p["path"]))
-            for _pi, _p in enumerate(_sorted_paths):
-                _del_rows.append({
-                    t("del_col"): _pi > 0,      # keep shortest, mark rest
-                    "#": _gi,
-                    t("cross_col_size"): human(_g["size"]),
-                    t("cross_col_path"): _p["path"],
-                    "_size": _g["size"],
-                })
-        _del_df = pd.DataFrame(_del_rows)
-        _edited = st.data_editor(
-            _del_df,
-            column_config={
-                t("del_col"): st.column_config.CheckboxColumn(
-                    t("del_col"), default=False),
-                "#": st.column_config.NumberColumn(
-                    "#", disabled=True, width="small"),
-                t("cross_col_size"): st.column_config.TextColumn(
-                    t("cross_col_size"), disabled=True, width="small"),
-                t("cross_col_path"): st.column_config.TextColumn(
-                    t("cross_col_path"), disabled=True, width="large"),
-                "_size": None,
-            },
-            disabled=["#", t("cross_col_size"), t("cross_col_path")],
-            hide_index=True,
-            use_container_width=True,
-            key="del_editor",
+        st.subheader(t("duplicate_folders"))
+        for g in folders[:100]:
+            with st.expander(
+                f"{g['count']}× {t('identical_folders')}  ·  {g['hash'][:12]}"
+            ):
+                for p in g["paths"]:
+                    st.code(p + "/", language=None)
+        if len(folders) > 100:
+            st.caption(t("groups_not_shown", n=len(folders) - 100))
+
+        # ----- Interactive delete -----
+        st.divider()
+        st.subheader(t("del_title"))
+        st.caption(t("del_caption"))
+
+        if not root_mounted:
+            st.warning(t("del_root_unmounted"))
+        elif files:
+            # Build editor dataframe — cap at 200 groups (same as display)
+            _del_rows = []
+            for _gi, _g in enumerate(files[:200], 1):
+                _sorted_paths = sorted(_g["paths"], key=lambda p: len(p["path"]))
+                for _pi, _p in enumerate(_sorted_paths):
+                    _del_rows.append({
+                        t("del_col"): _pi > 0,      # keep shortest, mark rest
+                        "#": _gi,
+                        t("cross_col_size"): human(_g["size"]),
+                        t("cross_col_path"): _p["path"],
+                        "_size": _g["size"],
+                    })
+            _del_df = pd.DataFrame(_del_rows)
+            _edited = st.data_editor(
+                _del_df,
+                column_config={
+                    t("del_col"): st.column_config.CheckboxColumn(
+                        t("del_col"), default=False),
+                    "#": st.column_config.NumberColumn(
+                        "#", disabled=True, width="small"),
+                    t("cross_col_size"): st.column_config.TextColumn(
+                        t("cross_col_size"), disabled=True, width="small"),
+                    t("cross_col_path"): st.column_config.TextColumn(
+                        t("cross_col_path"), disabled=True, width="large"),
+                    "_size": None,
+                },
+                disabled=["#", t("cross_col_size"), t("cross_col_path")],
+                hide_index=True,
+                use_container_width=True,
+                key="del_editor",
+            )
+
+            _del_action = st.selectbox(
+                t("del_action_label"),
+                options=list(CLEANUP_ACTIONS),
+                format_func=lambda a: t(f"action_{a}"),
+                key="del_action_sel",
+            )
+
+            _marked = _edited[_edited[t("del_col")].astype(bool)]
+            _n_marked = len(_marked)
+            _bytes_marked = int(_marked["_size"].sum()) if _n_marked else 0
+
+            if _n_marked == 0:
+                st.caption(t("del_none_selected"))
+            else:
+                if st.button(
+                    t("del_verify_btn", n=_n_marked, size=human(_bytes_marked)),
+                    type="primary", key="del_verify_btn",
+                ):
+                    _plan = []
+                    for _gid in _marked["#"].unique():
+                        _gdf = _edited[_edited["#"] == _gid]
+                        _keepers = _gdf[~_gdf[t("del_col")].astype(bool)]
+                        _to_del = _gdf[_gdf[t("del_col")].astype(bool)]
+
+                        if _keepers.empty:
+                            _plan.append({"group": int(_gid),
+                                          "status": "no_keeper",
+                                          "keeper": None, "to_delete": []})
+                            continue
+
+                        _kr = _keepers.iloc[0]
+                        _kcheck = verify_file(
+                            root_path, _kr[t("cross_col_path")], int(_kr["_size"]))
+                        _del_checks = []
+                        for _, _dr in _to_del.iterrows():
+                            _dc = verify_file(
+                                root_path, _dr[t("cross_col_path")], int(_dr["_size"]))
+                            _del_checks.append({
+                                "path": _dr[t("cross_col_path")],
+                                "full_path": _dc["full_path"],
+                                "exists": _dc["ok"],
+                                "size": int(_dr["_size"]),
+                            })
+                        _plan.append({
+                            "group": int(_gid),
+                            "status": "ok" if _kcheck["ok"] else "keeper_missing",
+                            "keeper": {"path": _kr[t("cross_col_path")],
+                                       "full_path": _kcheck["full_path"],
+                                       "ok": _kcheck["ok"],
+                                       "reason": _kcheck["reason"]},
+                            "to_delete": _del_checks,
+                        })
+                    st.session_state["del_plan"] = _plan
+                    st.session_state["del_action"] = _del_action
+                    st.session_state["del_root_path"] = str(root_path)
+                    st.rerun()
+
+        # show execution result banner
+        if "del_result" in st.session_state:
+            _res = st.session_state.pop("del_result")
+            st.success(t("del_done", n=_res["ok"],
+                         size=human(_res["freed_bytes"])))
+            if _res["errors"]:
+                st.error(t("del_errors", n=len(_res["errors"])))
+
+        # ----- Assisted cleanup -----
+        st.divider()
+        st.subheader(t("cleanup_title"))
+        st.caption(t("cleanup_caption"))
+        cc1, cc2 = st.columns(2)
+        cleanup_strategy = cc1.selectbox(
+            t("cleanup_strategy"),
+            options=list(CLEANUP_STRATEGIES),
+            format_func=lambda s: t(f"strategy_{s}"),
         )
-
-        _del_action = st.selectbox(
-            t("del_action_label"),
+        cleanup_action = cc2.selectbox(
+            t("cleanup_action"),
             options=list(CLEANUP_ACTIONS),
             format_func=lambda a: t(f"action_{a}"),
-            key="del_action_sel",
         )
+        if st.button(t("cleanup_generate"), key="gen_cleanup"):
+            script = generate_cleanup_script(
+                selected_db, min_size,
+                strategy=cleanup_strategy, action=cleanup_action,
+            )
+            st.session_state["cleanup_script"] = script
+            st.session_state["cleanup_db"] = str(selected_db)
 
-        _marked = _edited[_edited[t("del_col")].astype(bool)]
-        _n_marked = len(_marked)
-        _bytes_marked = int(_marked["_size"].sum()) if _n_marked else 0
-
-        if _n_marked == 0:
-            st.caption(t("del_none_selected"))
-        else:
-            if st.button(
-                t("del_verify_btn", n=_n_marked, size=human(_bytes_marked)),
-                type="primary", key="del_verify_btn",
-            ):
-                _plan = []
-                for _gid in _marked["#"].unique():
-                    _gdf = _edited[_edited["#"] == _gid]
-                    _keepers = _gdf[~_gdf[t("del_col")].astype(bool)]
-                    _to_del = _gdf[_gdf[t("del_col")].astype(bool)]
-
-                    if _keepers.empty:
-                        _plan.append({"group": int(_gid),
-                                      "status": "no_keeper",
-                                      "keeper": None, "to_delete": []})
-                        continue
-
-                    _kr = _keepers.iloc[0]
-                    _kcheck = verify_file(
-                        root_path, _kr[t("cross_col_path")], int(_kr["_size"]))
-                    _del_checks = []
-                    for _, _dr in _to_del.iterrows():
-                        _dc = verify_file(
-                            root_path, _dr[t("cross_col_path")], int(_dr["_size"]))
-                        _del_checks.append({
-                            "path": _dr[t("cross_col_path")],
-                            "full_path": _dc["full_path"],
-                            "exists": _dc["ok"],
-                            "size": int(_dr["_size"]),
-                        })
-                    _plan.append({
-                        "group": int(_gid),
-                        "status": "ok" if _kcheck["ok"] else "keeper_missing",
-                        "keeper": {"path": _kr[t("cross_col_path")],
-                                   "full_path": _kcheck["full_path"],
-                                   "ok": _kcheck["ok"],
-                                   "reason": _kcheck["reason"]},
-                        "to_delete": _del_checks,
-                    })
-                st.session_state["del_plan"] = _plan
-                st.session_state["del_action"] = _del_action
-                st.session_state["del_root_path"] = str(root_path)
-                st.rerun()
-
-    # show execution result banner
-    if "del_result" in st.session_state:
-        _res = st.session_state.pop("del_result")
-        st.success(t("del_done", n=_res["ok"],
-                     size=human(_res["freed_bytes"])))
-        if _res["errors"]:
-            st.error(t("del_errors", n=len(_res["errors"])))
-
-    # ----- Assisted cleanup -----
-    st.divider()
-    st.subheader(t("cleanup_title"))
-    st.caption(t("cleanup_caption"))
-    cc1, cc2 = st.columns(2)
-    cleanup_strategy = cc1.selectbox(
-        t("cleanup_strategy"),
-        options=list(CLEANUP_STRATEGIES),
-        format_func=lambda s: t(f"strategy_{s}"),
-    )
-    cleanup_action = cc2.selectbox(
-        t("cleanup_action"),
-        options=list(CLEANUP_ACTIONS),
-        format_func=lambda a: t(f"action_{a}"),
-    )
-    if st.button(t("cleanup_generate"), key="gen_cleanup"):
-        script = generate_cleanup_script(
-            selected_db, min_size,
-            strategy=cleanup_strategy, action=cleanup_action,
-        )
-        st.session_state["cleanup_script"] = script
-        st.session_state["cleanup_db"] = str(selected_db)
-
-    if (st.session_state.get("cleanup_script")
-            and st.session_state.get("cleanup_db") == str(selected_db)):
-        script = st.session_state["cleanup_script"]
-        n_actions = sum(1 for l in script.splitlines()
-                        if l.startswith(("rm ", "mv ")))
-        st.success(t("cleanup_ready", n=n_actions))
-        st.download_button(
-            t("cleanup_download"),
-            data=script.encode("utf-8"),
-            file_name=f"{selected_db.stem}-cleanup-{cleanup_action}.sh",
-            mime="text/x-shellscript",
-            type="primary",
-        )
-        with st.expander(t("cleanup_preview"), expanded=False):
-            st.code(script, language="bash")
+        if (st.session_state.get("cleanup_script")
+                and st.session_state.get("cleanup_db") == str(selected_db)):
+            script = st.session_state["cleanup_script"]
+            n_actions = sum(1 for l in script.splitlines()
+                            if l.startswith(("rm ", "mv ")))
+            st.success(t("cleanup_ready", n=n_actions))
+            st.download_button(
+                t("cleanup_download"),
+                data=script.encode("utf-8"),
+                file_name=f"{selected_db.stem}-cleanup-{cleanup_action}.sh",
+                mime="text/x-shellscript",
+                type="primary",
+            )
+            with st.expander(t("cleanup_preview"), expanded=False):
+                st.code(script, language="bash")
 
 # --- TreeMap ---
 with tab_map:
