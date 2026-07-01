@@ -43,7 +43,7 @@ READ_CHUNK = 1024 * 1024
 # BAM/VCF where header/footer are stable but body varies).
 HASH_VERSION = 2
 DX_VERSION = "1.0.0"
-SCHEMA_VERSION = 5  # see _migrate_to_v5 / SCHEMA constant below
+SCHEMA_VERSION = 6  # see _migrate_to_v6 / SCHEMA constant below
 SKIP_DIR_NAMES = {
     ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems",
     ".DocumentRevisions-V100", ".PKInstallSandboxManager",
@@ -197,6 +197,12 @@ CREATE INDEX IF NOT EXISTS idx_snap_size_partial
 CREATE INDEX IF NOT EXISTS idx_full ON entries(full_hash);
 CREATE INDEX IF NOT EXISTS idx_snap_inode
     ON entries(snapshot_id, inode, device);
+CREATE TABLE IF NOT EXISTS folder_meta (
+    rel_path TEXT PRIMARY KEY,
+    tags     TEXT NOT NULL DEFAULT '[]',
+    note     TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -669,48 +675,177 @@ def registry_remove(db_path: Path) -> None:
         _registry_save(data)
 
 
-# ---------- folder tags ----------
+# ---------- folder tags + notes ----------
+# Primary store: folder_meta table inside the .db file (portable).
+# Secondary store: registry JSON (index for cross-drive search without
+# opening every .db; kept in sync by tags_set / embed_meta_in_db).
+
+def _db_meta_write(db_path: Path, rel_path: str,
+                   tags: list[str], note: str) -> None:
+    """Write one folder_meta row directly to the .db (no open_db overhead)."""
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE IF NOT EXISTS folder_meta ("
+                     "rel_path TEXT PRIMARY KEY, tags TEXT NOT NULL DEFAULT '[]',"
+                     " note TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '')")
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        if tags or note.strip():
+            conn.execute(
+                "INSERT OR REPLACE INTO folder_meta (rel_path, tags, note, updated_at)"
+                " VALUES (?,?,?,?)",
+                (rel_path, json.dumps(tags), note.strip(), now),
+            )
+        else:
+            conn.execute("DELETE FROM folder_meta WHERE rel_path=?", (rel_path,))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 
 def tags_get(db_path: Path) -> dict[str, list[str]]:
-    """Return {rel_path: [tag, ...]} for all tagged folders in this db."""
+    """Return {rel_path: [tag, ...]} for all tagged folders.
+    Prefers .db (portable); falls back to registry."""
+    if db_path.exists():
+        try:
+            conn = sqlite3.connect(db_path)
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            if "folder_meta" in tables:
+                rows = conn.execute(
+                    "SELECT rel_path, tags FROM folder_meta"
+                    " WHERE tags IS NOT NULL AND tags != '[]'"
+                ).fetchall()
+                conn.close()
+                if rows:
+                    return {rp: json.loads(tgs) for rp, tgs in rows}
+            conn.close()
+        except Exception:
+            pass
+    # fall back to registry
     data = _registry_load()
     key = str(db_path.resolve())
     return dict(data.get("drives", {}).get(key, {}).get("folder_tags", {}))
 
 
-def tags_set(db_path: Path, rel_path: str, tags: list[str]) -> None:
-    """Set tags for a folder (replaces existing). Empty list removes the entry."""
+def notes_get(db_path: Path, rel_path: str) -> str:
+    """Return the note for one folder (empty string if none)."""
+    if db_path.exists():
+        try:
+            conn = sqlite3.connect(db_path)
+            row = conn.execute(
+                "SELECT note FROM folder_meta WHERE rel_path=?", (rel_path,)
+            ).fetchone()
+            conn.close()
+            if row:
+                return row[0] or ""
+        except Exception:
+            pass
+    data = _registry_load()
+    key = str(db_path.resolve())
+    return data.get("drives", {}).get(key, {}).get("folder_notes", {}).get(rel_path, "")
+
+
+def tags_set(db_path: Path, rel_path: str, tags: list[str],
+             note: str | None = None) -> None:
+    """Set tags (and optionally note) for a folder. Empty tags+note removes entry.
+    Writes to both .db (primary) and registry (index for cross-drive search)."""
+    clean_tags = [t.strip() for t in tags if t.strip()]
+
+    # --- .db (primary) ---
+    if note is None:
+        note = notes_get(db_path, rel_path)  # preserve existing note
+    _db_meta_write(db_path, rel_path, clean_tags, note)
+
+    # --- registry (search index) ---
     data = _registry_load()
     key = str(db_path.resolve())
     drive = data.setdefault("drives", {}).setdefault(key, {})
     ft = drive.setdefault("folder_tags", {})
-    if tags:
-        ft[rel_path] = [t.strip() for t in tags if t.strip()]
+    fn = drive.setdefault("folder_notes", {})
+    if clean_tags:
+        ft[rel_path] = clean_tags
     else:
         ft.pop(rel_path, None)
     if not ft:
-        del drive["folder_tags"]
+        drive.pop("folder_tags", None)
+    if note and note.strip():
+        fn[rel_path] = note.strip()
+    else:
+        fn.pop(rel_path, None)
+    if not fn:
+        drive.pop("folder_notes", None)
     _registry_save(data)
 
 
-def tags_search(query: str) -> list[dict]:
-    """Search tagged folders across all registered drives.
+def notes_set(db_path: Path, rel_path: str, note: str) -> None:
+    """Update the note for a folder (preserves existing tags)."""
+    existing_tags = tags_get(db_path).get(rel_path, [])
+    tags_set(db_path, rel_path, existing_tags, note=note)
 
-    Matches query (case-insensitive) against tag names AND folder paths.
-    Returns list of {label, db, rel_path, tags} sorted by drive label.
+
+def embed_meta_in_db(db_path: Path) -> int:
+    """Copy all registry tags+notes for this db into its folder_meta table.
+    Called at end of refresh/index so the .db becomes self-contained.
+    Returns number of rows written."""
+    data = _registry_load()
+    key = str(db_path.resolve())
+    meta = data.get("drives", {}).get(key, {})
+    folder_tags = meta.get("folder_tags", {})
+    folder_notes = meta.get("folder_notes", {})
+    all_paths = set(folder_tags) | set(folder_notes)
+    if not all_paths:
+        return 0
+    written = 0
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE IF NOT EXISTS folder_meta ("
+                     "rel_path TEXT PRIMARY KEY, tags TEXT NOT NULL DEFAULT '[]',"
+                     " note TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '')")
+        for rp in all_paths:
+            tgs = folder_tags.get(rp, [])
+            nt = folder_notes.get(rp, "")
+            conn.execute(
+                "INSERT OR REPLACE INTO folder_meta (rel_path, tags, note, updated_at)"
+                " VALUES (?,?,?,?)",
+                (rp, json.dumps(tgs), nt, now),
+            )
+            written += 1
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+    return written
+
+
+def tags_search(query: str) -> list[dict]:
+    """Search tagged/noted folders across all registered drives.
+    Matches query against tag names, folder paths, and notes.
+    Returns list of {label, db, rel_path, tags, note} sorted by drive, path.
     """
     q = query.strip().lower()
     data = _registry_load()
     results = []
     for db_str, meta in data.get("drives", {}).items():
         label = meta.get("label", Path(db_str).stem)
-        for rel_path, tags in meta.get("folder_tags", {}).items():
-            if q in rel_path.lower() or any(q in tag.lower() for tag in tags):
+        folder_tags = meta.get("folder_tags", {})
+        folder_notes = meta.get("folder_notes", {})
+        all_paths = set(folder_tags) | set(folder_notes)
+        for rel_path in all_paths:
+            tgs = folder_tags.get(rel_path, [])
+            nt = folder_notes.get(rel_path, "")
+            if not q or (
+                q in rel_path.lower()
+                or any(q in tag.lower() for tag in tgs)
+                or q in nt.lower()
+            ):
                 results.append({
                     "label": label,
                     "db": Path(db_str),
                     "rel_path": rel_path,
-                    "tags": tags,
+                    "tags": tgs,
+                    "note": nt,
                 })
     results.sort(key=lambda r: (r["label"].lower(), r["rel_path"]))
     return results
@@ -780,12 +915,32 @@ def import_folder(folder: Path) -> list[dict]:
     return results
 
 
+def _migrate_to_v6(conn: sqlite3.Connection) -> None:
+    """Add folder_meta table if absent (v6). Idempotent — SCHEMA already has
+    CREATE TABLE IF NOT EXISTS, but calling it explicitly here makes the chain
+    clear and allows future migrations to key off user_version."""
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
+    if "folder_meta" not in tables:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS folder_meta (
+                rel_path   TEXT PRIMARY KEY,
+                tags       TEXT NOT NULL DEFAULT '[]',
+                note       TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+        """)
+        conn.commit()
+
+
 def open_db(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
-    # Existing tables may be v1/v2/v3/v4; migrate forward in sequence.
+    # Existing tables may be v1/v2/v3/v4/v5; migrate forward in sequence.
     _migrate_to_v3(conn)
     _migrate_to_v4(conn)
     _migrate_to_v5(conn)
+    _migrate_to_v6(conn)
     conn.executescript(SCHEMA)
     # in case `drive` was created without these (very old .db)
     drv_cols = {r[1] for r in conn.execute("PRAGMA table_info(drive)")}
@@ -1386,6 +1541,9 @@ def refresh_drive(db_path: Path, do_full: bool = False) -> None:
     index_drive(root, db_path, label, do_full,
                 one_fs=one_fs, skip_cloud=skip_cloud, reuse_old=old,
                 mode="refresh", target_snapshot_id=sid)
+    n = embed_meta_in_db(db_path)
+    if n:
+        print(f"  embedded {n} folder annotations into .db", file=sys.stderr)
 
 
 def snapshot_drive(db_path: Path, do_full: bool = False,

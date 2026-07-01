@@ -31,7 +31,7 @@ from drive_xray import (
     cross_dedupe, read_drive_index_opts,
     verify_file, execute_file_action, QUARANTINE_DIR, AUDIT_LOG,
     read_config, write_config, get_db_dir, import_folder,
-    tags_get, tags_set, tags_search,
+    tags_get, tags_set, tags_search, notes_get, notes_set,
 )
 
 DB_DIR = get_db_dir()
@@ -226,13 +226,19 @@ TRANSLATIONS = {
         "tags_col_tags": "Etiquetas",
         "tags_filter": "🔍 Filtrar por etiqueta ou pasta",
         "tags_filter_empty": "Nenhuma etiqueta corresponde ao filtro.",
+        "tags_note_label": "Nota (texto livre)",
+        "tags_note_placeholder": "Backup de 2023-03, já verificado. Contém runs STP e ZP.",
+        "tags_note_save": "Guardar nota",
+        "tags_col_note": "Nota",
+        "tags_legend": "Legenda de cores",
         # cross-drive tag search (Compare tab)
         "tag_search_title": "🔍 Pesquisar por etiqueta",
-        "tag_search_caption": "Procura em todas as drives indexadas. Corresponde ao nome da etiqueta ou ao caminho da pasta.",
-        "tag_search_input": "Etiqueta ou caminho",
+        "tag_search_caption": "Procura em todas as drives indexadas. Corresponde à etiqueta, ao caminho ou à nota.",
+        "tag_search_input": "Etiqueta, caminho ou nota",
         "tag_search_col_drive": "Drive",
         "tag_search_col_path": "Pasta",
         "tag_search_col_tags": "Etiquetas",
+        "tag_search_col_note": "Nota",
         "tag_search_empty": "Nenhuma pasta etiquetada encontrada.",
         "tag_search_no_tags": "Ainda não existem etiquetas em nenhuma drive. Usa o tab Mapa para etiquetar pastas.",
         # cleanup
@@ -431,13 +437,19 @@ TRANSLATIONS = {
         "tags_col_tags": "Tags",
         "tags_filter": "🔍 Filter by tag or path",
         "tags_filter_empty": "No tags match the filter.",
+        "tags_note_label": "Note (free text)",
+        "tags_note_placeholder": "Backup from 2023-03, verified. Contains STP and ZP runs.",
+        "tags_note_save": "Save note",
+        "tags_col_note": "Note",
+        "tags_legend": "Color legend",
         # cross-drive tag search (Compare tab)
         "tag_search_title": "🔍 Search by tag",
-        "tag_search_caption": "Searches all indexed drives. Matches tag name or folder path.",
-        "tag_search_input": "Tag or path",
+        "tag_search_caption": "Searches all indexed drives. Matches tag name, folder path, or note.",
+        "tag_search_input": "Tag, path or note",
         "tag_search_col_drive": "Drive",
         "tag_search_col_path": "Folder",
         "tag_search_col_tags": "Tags",
+        "tag_search_col_note": "Note",
         "tag_search_empty": "No tagged folders found.",
         "tag_search_no_tags": "No tags exist on any drive yet. Use the Map tab to tag folders.",
         # cleanup
@@ -1600,6 +1612,18 @@ with tab_map:
 
     _folder_tags = tags_get(selected_db)
 
+    # colour palette — auto-assigned per unique tag (alphabetical order)
+    _TAG_PALETTE = [
+        "#e74c3c", "#3498db", "#2ecc71", "#f39c12",
+        "#9b59b6", "#1abc9c", "#e67e22", "#e91e63",
+        "#00bcd4", "#8bc34a", "#ff7043", "#7986cb",
+    ]
+    _all_unique_tags = sorted({tg for tgs in _folder_tags.values() for tg in tgs})
+    _tag_color = {tg: _TAG_PALETTE[i % len(_TAG_PALETTE)]
+                  for i, tg in enumerate(_all_unique_tags)}
+    _DEFAULT_FOLDER_COLOR = "#1f77b4"
+    _DEFAULT_FILE_COLOR   = "#888888"
+
     if not rows:
         st.info(t("map_empty"))
     else:
@@ -1608,13 +1632,6 @@ with tab_map:
         labels = [r["name"] for r in rows]
         parents = [r["parent"] for r in rows]
         values = [r["size"] for r in rows]
-        colors = [1 if r["kind"] == "folder" else 0 for r in rows]
-
-        def _tag_suffix(rp):
-            tgs = _folder_tags.get(rp, [])
-            return "  🏷️ " + " · ".join(tgs) if tgs else ""
-
-        customdata = [r["size_human"] + _tag_suffix(r["rel_path"]) for r in rows]
 
         # id → rel_path lookup for click-to-select
         _id_to_relpath = {r["id"]: r["rel_path"] for r in rows}
@@ -1623,20 +1640,35 @@ with tab_map:
             r["rel_path"] for r in rows if r["kind"] == "folder" and r["rel_path"] != "."
         })
 
+        def _cell_color(rp, kind):
+            if kind != "folder":
+                return _DEFAULT_FILE_COLOR
+            tgs = _folder_tags.get(rp, [])
+            return _tag_color.get(tgs[0], _DEFAULT_FOLDER_COLOR) if tgs else _DEFAULT_FOLDER_COLOR
+
+        def _hover_extra(rp):
+            tgs = _folder_tags.get(rp, [])
+            nt = notes_get(selected_db, rp)
+            parts = []
+            if tgs:
+                parts.append("🏷️ " + " · ".join(tgs))
+            if nt:
+                parts.append("📝 " + (nt[:80] + "…" if len(nt) > 80 else nt))
+            return ("<br>" + "<br>".join(parts)) if parts else ""
+
+        cell_colors = [_cell_color(r["rel_path"], r["kind"]) for r in rows]
+        customdata  = [r["size_human"] + _hover_extra(r["rel_path"]) for r in rows]
+
         fig = go.Figure(go.Treemap(
             ids=ids, labels=labels, parents=parents, values=values,
             branchvalues="total",
             customdata=customdata,
             hovertemplate=("<b>%{label}</b><br>%{customdata}"
                            "<br>%{percentParent:.1%} of parent<extra></extra>"),
-            marker=dict(colors=colors,
-                        colorscale=[[0, "#888"], [1, "#1f77b4"]],
-                        showscale=False),
+            marker=dict(colors=cell_colors, showscale=False),
             textinfo="label+value",
             texttemplate="<b>%{label}</b><br>%{customdata}",
         ))
-        # clickmode='event+select' makes single-click fire a selection event
-        # which Streamlit's on_select can capture
         fig.update_layout(margin=dict(t=10, l=0, r=0, b=0), height=700,
                           clickmode="event+select")
         _map_event = st.plotly_chart(
@@ -1645,6 +1677,16 @@ with tab_map:
         )
         st.caption(t("map_legend", n=len(rows)))
 
+        # colour legend when tags are present
+        if _tag_color:
+            with st.expander(t("tags_legend"), expanded=False):
+                _leg_cols = st.columns(min(len(_tag_color), 4))
+                for i, (tg, col) in enumerate(_tag_color.items()):
+                    _leg_cols[i % len(_leg_cols)].markdown(
+                        f'<span style="background:{col};color:#fff;'
+                        f'padding:2px 8px;border-radius:4px;font-size:0.85em">'
+                        f'{tg}</span>', unsafe_allow_html=True)
+
         # pre-select clicked folder in the tag editor
         if _map_event and _map_event.selection and _map_event.selection.get("points"):
             _clicked_id = str(_map_event.selection["points"][0].get("id", ""))
@@ -1652,7 +1694,7 @@ with tab_map:
             if _clicked_rp and _clicked_rp != "." and _clicked_rp in _map_folders:
                 if st.session_state.get("tags_folder_sel") != _clicked_rp:
                     st.session_state["tags_folder_sel"] = _clicked_rp
-                    st.session_state["_tags_last_folder"] = None  # force tag pre-fill
+                    st.session_state["_tags_last_folder"] = None
 
     # ── Tag editor ────────────────────────────────────────────────────────────
     with st.expander(t("tags_expander"), expanded=bool(_folder_tags)):
@@ -1663,16 +1705,12 @@ with tab_map:
         }) if rows else []
 
         _tc1, _tc2 = st.columns([3, 2])
-
-        # persist selected folder across reruns via session_state key
         _sel_folder = _tc1.selectbox(
             t("tags_select"), _map_folders,
             index=None,
             key="tags_folder_sel",
         )
-        # pre-fill tags input when a folder with existing tags is selected
         _existing_tags = ", ".join(_folder_tags.get(_sel_folder, [])) if _sel_folder else ""
-        # only pre-fill when the folder changes; let the user edit freely otherwise
         _input_key = f"tags_input_{_sel_folder}"
         if st.session_state.get("_tags_last_folder") != _sel_folder:
             st.session_state["_tags_last_folder"] = _sel_folder
@@ -1683,18 +1721,34 @@ with tab_map:
             key=_input_key,
         )
 
+        # note field
+        _note_key = f"note_input_{_sel_folder}"
+        if st.session_state.get("_tags_last_folder") != _sel_folder or _note_key not in st.session_state:
+            _existing_note = notes_get(selected_db, _sel_folder) if _sel_folder else ""
+            st.session_state[_note_key] = _existing_note
+        _note_input = st.text_area(
+            t("tags_note_label"),
+            placeholder=t("tags_note_placeholder"),
+            key=_note_key,
+            height=80,
+            disabled=not _sel_folder,
+        )
+
         _tb1, _tb2 = st.columns(2)
         if _tb1.button(t("tags_save"), type="primary",
                        disabled=not _sel_folder, key="tags_save_btn"):
             _new_tags = [x.strip() for x in _tag_input.split(",") if x.strip()]
-            tags_set(selected_db, _sel_folder, _new_tags)
-            _folder_tags = tags_get(selected_db)   # refresh for table below
+            tags_set(selected_db, _sel_folder, _new_tags, note=_note_input)
+            _folder_tags = tags_get(selected_db)
             st.toast(t("tags_saved"), icon="✅")
         if _tb2.button(t("tags_remove_btn"),
-                       disabled=not _sel_folder or _sel_folder not in _folder_tags,
+                       disabled=not _sel_folder or (
+                           _sel_folder not in _folder_tags
+                           and not notes_get(selected_db, _sel_folder)
+                       ),
                        key="tags_remove_btn"):
-            tags_set(selected_db, _sel_folder, [])
-            _folder_tags = tags_get(selected_db)   # refresh for table below
+            tags_set(selected_db, _sel_folder, [], note="")
+            _folder_tags = tags_get(selected_db)
             st.toast(t("tags_removed"), icon="🗑️")
 
         st.divider()
@@ -1711,7 +1765,9 @@ with tab_map:
             }
             if _filtered:
                 st.dataframe(
-                    [{t("tags_col_path"): p, t("tags_col_tags"): " · ".join(tgs)}
+                    [{t("tags_col_path"): p,
+                      t("tags_col_tags"): " · ".join(tgs),
+                      t("tags_col_note"): notes_get(selected_db, p)}
                      for p, tgs in _filtered.items()],
                     use_container_width=True, hide_index=True,
                 )
@@ -1825,6 +1881,7 @@ with tab_compare:
                     t("tag_search_col_drive"): r["label"],
                     t("tag_search_col_path"): r["rel_path"],
                     t("tag_search_col_tags"): " · ".join(r["tags"]),
+                    t("tag_search_col_note"): r.get("note", ""),
                 } for r in _ts_results],
                 use_container_width=True, hide_index=True,
             )
