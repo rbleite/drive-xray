@@ -31,6 +31,7 @@ from drive_xray import (
     cross_dedupe, read_drive_index_opts,
     verify_file, execute_file_action, QUARANTINE_DIR, AUDIT_LOG,
     read_config, write_config, get_db_dir, import_folder,
+    tags_get, tags_set,
 )
 
 DB_DIR = get_db_dir()
@@ -210,6 +211,19 @@ TRANSLATIONS = {
         "map_include_files": "Incluir ficheiros individuais (não só pastas)",
         "map_empty": "Sem pastas acima do tamanho mínimo. Baixa o threshold.",
         "map_legend": "A mostrar {n} elementos.",
+        # tags
+        "tags_expander": "🏷️ Etiquetar pastas",
+        "tags_caption": "Associa etiquetas livres a pastas para identificação rápida. Visíveis no tooltip do mapa.",
+        "tags_select": "Pasta (do mapa actual)",
+        "tags_input": "Etiquetas (separadas por vírgula)",
+        "tags_save": "Guardar",
+        "tags_remove_btn": "Remover etiquetas",
+        "tags_saved": "Etiquetas guardadas.",
+        "tags_removed": "Etiquetas removidas.",
+        "tags_active": "Pastas etiquetadas nesta drive",
+        "tags_none": "Nenhuma pasta etiquetada ainda.",
+        "tags_col_path": "Pasta",
+        "tags_col_tags": "Etiquetas",
         # cleanup
         "cleanup_title": "🧽 Assistente de limpeza",
         "cleanup_caption": "Gera um script shell com as remoções/movimentos sugeridos. **Não apaga nada automaticamente** — revê e corre manualmente.",
@@ -391,6 +405,19 @@ TRANSLATIONS = {
         "map_include_files": "Include individual files (not just folders)",
         "map_empty": "No folders above the minimum size. Lower the threshold.",
         "map_legend": "Showing {n} items.",
+        # tags
+        "tags_expander": "🏷️ Tag folders",
+        "tags_caption": "Attach free-form tags to folders for quick identification. Visible in map tooltips.",
+        "tags_select": "Folder (from current map)",
+        "tags_input": "Tags (comma-separated)",
+        "tags_save": "Save",
+        "tags_remove_btn": "Remove tags",
+        "tags_saved": "Tags saved.",
+        "tags_removed": "Tags removed.",
+        "tags_active": "Tagged folders in this drive",
+        "tags_none": "No folders tagged yet.",
+        "tags_col_path": "Folder",
+        "tags_col_tags": "Tags",
         # cleanup
         "cleanup_title": "🧽 Cleanup assistant",
         "cleanup_caption": "Generates a shell script of suggested removals/moves. **It does NOT delete anything automatically** — review and run manually.",
@@ -663,6 +690,7 @@ def treemap_rows(db: Path, min_size: int, include_files: bool = False,
             "size": sz,
             "size_human": human(sz),
             "kind": "folder" if isdir else "file",
+            "rel_path": rp,
         })
     return rows
 
@@ -1547,17 +1575,25 @@ with tab_map:
     with st.spinner(t("calculating")):
         _pre = _ss_compute(_map_pre_key, lambda: _treemap_precompute(selected_db))
     rows = treemap_rows(selected_db, map_min, map_include_files, _precomputed=_pre)
+
+    _folder_tags = tags_get(selected_db)
+
     if not rows:
         st.info(t("map_empty"))
     else:
         import plotly.graph_objects as go
-        # ensure root row exists (some dbs have root id with rel_path=".")
         ids = [r["id"] for r in rows]
         labels = [r["name"] for r in rows]
         parents = [r["parent"] for r in rows]
         values = [r["size"] for r in rows]
-        customdata = [r["size_human"] for r in rows]
         colors = [1 if r["kind"] == "folder" else 0 for r in rows]
+
+        def _tag_suffix(rp):
+            tgs = _folder_tags.get(rp, [])
+            return "  🏷️ " + " · ".join(tgs) if tgs else ""
+
+        customdata = [r["size_human"] + _tag_suffix(r["rel_path"]) for r in rows]
+
         fig = go.Figure(go.Treemap(
             ids=ids, labels=labels, parents=parents, values=values,
             branchvalues="total",
@@ -1573,6 +1609,53 @@ with tab_map:
         fig.update_layout(margin=dict(t=10, l=0, r=0, b=0), height=700)
         st.plotly_chart(fig, use_container_width=True)
         st.caption(t("map_legend", n=len(rows)))
+
+    # ── Tag editor ────────────────────────────────────────────────────────────
+    with st.expander(t("tags_expander"), expanded=bool(_folder_tags)):
+        st.caption(t("tags_caption"))
+
+        # folder selector: paths visible in current map (folders only)
+        _map_folders = sorted({
+            r["rel_path"] for r in rows if r["kind"] == "folder" and r["rel_path"] != "."
+        }) if rows else []
+
+        _tc1, _tc2 = st.columns([3, 2])
+        _sel_folder = _tc1.selectbox(
+            t("tags_select"), _map_folders,
+            index=None, placeholder="sequencing/run-2024",
+            key="tags_folder_sel",
+        )
+        _current_tags = ", ".join(_folder_tags.get(_sel_folder, [])) if _sel_folder else ""
+        _tag_input = _tc2.text_input(
+            t("tags_input"), value=_current_tags,
+            placeholder="backup, importante, NGS",
+            key="tags_input_field",
+        )
+
+        _tb1, _tb2 = st.columns(2)
+        if _tb1.button(t("tags_save"), type="primary",
+                       disabled=not _sel_folder, key="tags_save_btn"):
+            _new_tags = [x.strip() for x in _tag_input.split(",") if x.strip()]
+            tags_set(selected_db, _sel_folder, _new_tags)
+            st.success(t("tags_saved"))
+            st.rerun()
+        if _tb2.button(t("tags_remove_btn"),
+                       disabled=not _sel_folder or _sel_folder not in _folder_tags,
+                       key="tags_remove_btn"):
+            tags_set(selected_db, _sel_folder, [])
+            st.success(t("tags_removed"))
+            st.rerun()
+
+        st.divider()
+        st.caption(t("tags_active"))
+        if _folder_tags:
+            st.dataframe(
+                [{t("tags_col_path"): p, t("tags_col_tags"): " · ".join(tgs)}
+                 for p, tgs in sorted(_folder_tags.items())],
+                use_container_width=True, hide_index=True,
+            )
+        else:
+            st.info(t("tags_none"))
 
 # --- History ---
 with tab_history:

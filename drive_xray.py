@@ -669,6 +669,30 @@ def registry_remove(db_path: Path) -> None:
         _registry_save(data)
 
 
+# ---------- folder tags ----------
+
+def tags_get(db_path: Path) -> dict[str, list[str]]:
+    """Return {rel_path: [tag, ...]} for all tagged folders in this db."""
+    data = _registry_load()
+    key = str(db_path.resolve())
+    return dict(data.get("drives", {}).get(key, {}).get("folder_tags", {}))
+
+
+def tags_set(db_path: Path, rel_path: str, tags: list[str]) -> None:
+    """Set tags for a folder (replaces existing). Empty list removes the entry."""
+    data = _registry_load()
+    key = str(db_path.resolve())
+    drive = data.setdefault("drives", {}).setdefault(key, {})
+    ft = drive.setdefault("folder_tags", {})
+    if tags:
+        ft[rel_path] = [t.strip() for t in tags if t.strip()]
+    else:
+        ft.pop(rel_path, None)
+    if not ft:
+        del drive["folder_tags"]
+    _registry_save(data)
+
+
 # ---------- config ----------
 
 def read_config() -> dict:
