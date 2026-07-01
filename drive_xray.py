@@ -75,6 +75,113 @@ def is_cloud_dir(name: str) -> bool:
     return any(n.startswith(p) for p in CLOUD_DIR_PREFIXES)
 
 
+# ---------------------------------------------------------------------------
+# Auto-tag rules — map sets of file extensions to a human label.
+# Compound extensions (.fastq.gz, .vcf.gz, .tar.gz …) are handled by
+# _file_ext() below.  Rules are checked in order; a folder can receive
+# multiple tags if files with different rule-sets are present.
+# ---------------------------------------------------------------------------
+AUTO_TAG_RULES: list[tuple[frozenset, str]] = [
+    # Genomics — sequencing technology / data type
+    (frozenset({"pod5", "fast5", "blow5"}),
+        "nanopore"),
+    (frozenset({"fastq", "fq", "fastq.gz", "fq.gz",
+                "bam", "bai", "cram", "crai", "sam"}),
+        "NGS"),
+    (frozenset({"vcf", "bcf", "gvcf", "vcf.gz", "gvcf.gz", "bcf.gz"}),
+        "variantes"),
+    (frozenset({"bed", "bedgraph", "bigwig", "bw", "bigbed", "bb",
+                "gtf", "gff", "gff3", "gff2",
+                "fasta", "fa", "fna", "faa", "ffn"}),
+        "genómica"),
+    # Medical imaging
+    (frozenset({"dcm", "dicom"}),
+        "imagiologia"),
+    # Documents
+    (frozenset({"pdf"}),
+        "PDF"),
+    (frozenset({"docx", "doc", "odt", "rtf", "pages", "tex"}),
+        "documentos"),
+    (frozenset({"xlsx", "xls", "ods", "csv", "tsv"}),
+        "tabelas"),
+    (frozenset({"pptx", "ppt", "odp", "key"}),
+        "apresentações"),
+    # Media
+    (frozenset({"mp3", "flac", "wav", "ogg", "aac", "m4a",
+                "opus", "wma", "alac", "aiff"}),
+        "música"),
+    (frozenset({"avi", "mp4", "mkv", "mov", "wmv", "webm",
+                "m4v", "mpg", "mpeg", "mts", "ts", "vob"}),
+        "vídeo"),
+    (frozenset({"jpg", "jpeg", "png", "gif", "tiff", "tif",
+                "heic", "heif", "raw", "cr2", "nef", "arw",
+                "dng", "orf", "rw2", "bmp", "webp"}),
+        "imagens"),
+    # Code / scripts
+    (frozenset({"py", "r", "rmd", "qmd", "ipynb", "jl", "m", "scala"}),
+        "código"),
+    (frozenset({"sh", "bash", "zsh", "fish", "ps1", "cmd", "bat", "nf"}),
+        "scripts"),
+    # Archives / databases
+    (frozenset({"zip", "tar", "gz", "bz2", "xz", "7z", "rar",
+                "tar.gz", "tar.bz2", "tar.xz"}),
+        "arquivo"),
+    (frozenset({"db", "sqlite", "sqlite3"}),
+        "base de dados"),
+]
+
+
+def _file_ext(name: str) -> str:
+    """Return the meaningful extension of a filename.
+    Handles compound extensions like .fastq.gz, .vcf.gz, .tar.gz."""
+    low = name.lower()
+    for compound in (
+        "fastq.gz", "fq.gz", "vcf.gz", "gvcf.gz", "bcf.gz",
+        "tar.gz", "tar.bz2", "tar.xz",
+    ):
+        if low.endswith("." + compound):
+            return compound
+    dot = low.rfind(".")
+    return low[dot + 1:] if dot >= 0 else ""
+
+
+def compute_auto_tags(db_path: "Path") -> dict[str, list[str]]:
+    """Derive tags per folder from file extensions in the latest snapshot.
+    Returns {rel_path: [tag, ...]}. Result is not persisted — callers should
+    cache it (e.g. in st.session_state keyed by db mtime)."""
+    if not db_path.exists():
+        return {}
+    try:
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute("""
+            SELECT e.rel_path
+            FROM entries e
+            WHERE e.snapshot_id = (SELECT MAX(id) FROM snapshots)
+              AND e.is_dir = 0
+              AND e.error IS NULL
+        """).fetchall()
+        conn.close()
+    except Exception:
+        return {}
+
+    from collections import defaultdict
+    folder_exts: dict[str, set] = defaultdict(set)
+    for (rp,) in rows:
+        slash = rp.rfind("/")
+        parent = rp[:slash] if slash >= 0 else "."
+        name = rp[slash + 1:] if slash >= 0 else rp
+        ext = _file_ext(name)
+        if ext:
+            folder_exts[parent].add(ext)
+
+    result: dict[str, list[str]] = {}
+    for folder, exts in folder_exts.items():
+        tags = [tag for rule_exts, tag in AUTO_TAG_RULES if exts & rule_exts]
+        if tags:
+            result[folder] = tags
+    return result
+
+
 _INT64_MAX = 0x7FFFFFFFFFFFFFFF
 _UINT64_MOD = 0x10000000000000000
 

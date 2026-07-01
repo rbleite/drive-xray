@@ -32,6 +32,7 @@ from drive_xray import (
     verify_file, execute_file_action, QUARANTINE_DIR, AUDIT_LOG,
     read_config, write_config, get_db_dir, import_folder,
     tags_get, tags_set, tags_search, notes_get, notes_set,
+    compute_auto_tags,
 )
 
 DB_DIR = get_db_dir()
@@ -231,6 +232,9 @@ TRANSLATIONS = {
         "tags_note_save": "Guardar nota",
         "tags_col_note": "Nota",
         "tags_legend": "Legenda de cores",
+        "auto_tags_detected": "Detetado automaticamente",
+        "auto_tags_promote": "⬆️ Usar como tags manuais",
+        "auto_tags_legend_note": "pastas com tags automáticas (sem tag manual)",
         # cross-drive tag search (Compare tab)
         "tag_search_title": "🔍 Pesquisar por etiqueta",
         "tag_search_caption": "Procura em todas as drives indexadas. Corresponde à etiqueta, ao caminho ou à nota.",
@@ -442,6 +446,9 @@ TRANSLATIONS = {
         "tags_note_save": "Save note",
         "tags_col_note": "Note",
         "tags_legend": "Color legend",
+        "auto_tags_detected": "Auto-detected",
+        "auto_tags_promote": "⬆️ Use as manual tags",
+        "auto_tags_legend_note": "folders with auto-detected tags (no manual tag)",
         # cross-drive tag search (Compare tab)
         "tag_search_title": "🔍 Search by tag",
         "tag_search_caption": "Searches all indexed drives. Matches tag name, folder path, or note.",
@@ -1612,6 +1619,15 @@ with tab_map:
 
     _folder_tags = tags_get(selected_db)
 
+    # auto-tags — computed from file extensions in latest snapshot, cached by db mtime
+    _at_mtime_key = f"_at_mtime_{selected_db}"
+    _at_data_key  = f"_auto_tags_{selected_db}"
+    _db_mtime = selected_db.stat().st_mtime if selected_db.exists() else 0
+    if st.session_state.get(_at_mtime_key) != _db_mtime:
+        st.session_state[_at_data_key]  = compute_auto_tags(selected_db)
+        st.session_state[_at_mtime_key] = _db_mtime
+    _auto_tags: dict = st.session_state.get(_at_data_key, {})
+
     # colour palette — auto-assigned per unique tag (alphabetical order)
     _TAG_PALETTE = [
         "#e74c3c", "#3498db", "#2ecc71", "#f39c12",
@@ -1623,6 +1639,7 @@ with tab_map:
                   for i, tg in enumerate(_all_unique_tags)}
     _DEFAULT_FOLDER_COLOR = "#1f77b4"
     _DEFAULT_FILE_COLOR   = "#888888"
+    _AUTO_TAG_COLOR       = "#78909c"  # blue-grey for auto-detected folders
 
     if not rows:
         st.info(t("map_empty"))
@@ -1644,14 +1661,21 @@ with tab_map:
             if kind != "folder":
                 return _DEFAULT_FILE_COLOR
             tgs = _folder_tags.get(rp, [])
-            return _tag_color.get(tgs[0], _DEFAULT_FOLDER_COLOR) if tgs else _DEFAULT_FOLDER_COLOR
+            if tgs:
+                return _tag_color.get(tgs[0], _DEFAULT_FOLDER_COLOR)
+            if _auto_tags.get(rp):
+                return _AUTO_TAG_COLOR
+            return _DEFAULT_FOLDER_COLOR
 
         def _hover_extra(rp):
             tgs = _folder_tags.get(rp, [])
+            atgs = _auto_tags.get(rp, [])
             nt = notes_get(selected_db, rp)
             parts = []
             if tgs:
                 parts.append("🏷️ " + " · ".join(tgs))
+            if atgs:
+                parts.append("🤖 " + " · ".join(atgs))
             if nt:
                 parts.append("📝 " + (nt[:80] + "…" if len(nt) > 80 else nt))
             return ("<br>" + "<br>".join(parts)) if parts else ""
@@ -1677,15 +1701,22 @@ with tab_map:
         )
         st.caption(t("map_legend", n=len(rows)))
 
-        # colour legend when tags are present
-        if _tag_color:
+        # colour legend when tags or auto-tags are present
+        if _tag_color or _auto_tags:
             with st.expander(t("tags_legend"), expanded=False):
-                _leg_cols = st.columns(min(len(_tag_color), 4))
-                for i, (tg, col) in enumerate(_tag_color.items()):
+                _leg_items = list(_tag_color.items())
+                if _auto_tags:
+                    _leg_items.append(("🤖 auto", _AUTO_TAG_COLOR))
+                _leg_cols = st.columns(min(len(_leg_items), 4))
+                for i, (tg, col) in enumerate(_leg_items):
+                    label = tg if not tg.startswith("🤖") else (
+                        f'{tg} <span style="font-size:0.75em;opacity:0.8">'
+                        f'— {t("auto_tags_legend_note")}</span>'
+                    )
                     _leg_cols[i % len(_leg_cols)].markdown(
                         f'<span style="background:{col};color:#fff;'
                         f'padding:2px 8px;border-radius:4px;font-size:0.85em">'
-                        f'{tg}</span>', unsafe_allow_html=True)
+                        f'{label}</span>', unsafe_allow_html=True)
 
         # pre-select clicked folder in the tag editor
         if _map_event and _map_event.selection and _map_event.selection.get("points"):
@@ -1715,6 +1746,27 @@ with tab_map:
         if st.session_state.get("_tags_last_folder") != _sel_folder:
             st.session_state["_tags_last_folder"] = _sel_folder
             st.session_state[_input_key] = _existing_tags
+
+        # auto-tag suggestions for the selected folder
+        _sel_auto = _auto_tags.get(_sel_folder, []) if _sel_folder else []
+        if _sel_auto:
+            _chips_html = " ".join(
+                f'<span style="background:#78909c;color:#fff;padding:2px 8px;'
+                f'border-radius:12px;font-size:0.8em;margin-right:2px">{tg}</span>'
+                for tg in _sel_auto
+            )
+            st.markdown(
+                f'🤖 {t("auto_tags_detected")}: {_chips_html}',
+                unsafe_allow_html=True,
+            )
+            if st.button(t("auto_tags_promote"), key="auto_promote_btn"):
+                _merged = list(dict.fromkeys(
+                    [x.strip() for x in st.session_state.get(_input_key, "").split(",") if x.strip()]
+                    + _sel_auto
+                ))
+                st.session_state[_input_key] = ", ".join(_merged)
+                st.rerun()
+
         _tag_input = _tc2.text_input(
             t("tags_input"),
             placeholder="backup, importante, NGS",
