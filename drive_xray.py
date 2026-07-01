@@ -693,6 +693,29 @@ def tags_set(db_path: Path, rel_path: str, tags: list[str]) -> None:
     _registry_save(data)
 
 
+def tags_search(query: str) -> list[dict]:
+    """Search tagged folders across all registered drives.
+
+    Matches query (case-insensitive) against tag names AND folder paths.
+    Returns list of {label, db, rel_path, tags} sorted by drive label.
+    """
+    q = query.strip().lower()
+    data = _registry_load()
+    results = []
+    for db_str, meta in data.get("drives", {}).items():
+        label = meta.get("label", Path(db_str).stem)
+        for rel_path, tags in meta.get("folder_tags", {}).items():
+            if q in rel_path.lower() or any(q in tag.lower() for tag in tags):
+                results.append({
+                    "label": label,
+                    "db": Path(db_str),
+                    "rel_path": rel_path,
+                    "tags": tags,
+                })
+    results.sort(key=lambda r: (r["label"].lower(), r["rel_path"]))
+    return results
+
+
 # ---------- config ----------
 
 def read_config() -> dict:

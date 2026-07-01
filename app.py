@@ -31,7 +31,7 @@ from drive_xray import (
     cross_dedupe, read_drive_index_opts,
     verify_file, execute_file_action, QUARANTINE_DIR, AUDIT_LOG,
     read_config, write_config, get_db_dir, import_folder,
-    tags_get, tags_set,
+    tags_get, tags_set, tags_search,
 )
 
 DB_DIR = get_db_dir()
@@ -224,6 +224,17 @@ TRANSLATIONS = {
         "tags_none": "Nenhuma pasta etiquetada ainda.",
         "tags_col_path": "Pasta",
         "tags_col_tags": "Etiquetas",
+        "tags_filter": "🔍 Filtrar por etiqueta ou pasta",
+        "tags_filter_empty": "Nenhuma etiqueta corresponde ao filtro.",
+        # cross-drive tag search (Compare tab)
+        "tag_search_title": "🔍 Pesquisar por etiqueta",
+        "tag_search_caption": "Procura em todas as drives indexadas. Corresponde ao nome da etiqueta ou ao caminho da pasta.",
+        "tag_search_input": "Etiqueta ou caminho",
+        "tag_search_col_drive": "Drive",
+        "tag_search_col_path": "Pasta",
+        "tag_search_col_tags": "Etiquetas",
+        "tag_search_empty": "Nenhuma pasta etiquetada encontrada.",
+        "tag_search_no_tags": "Ainda não existem etiquetas em nenhuma drive. Usa o tab Mapa para etiquetar pastas.",
         # cleanup
         "cleanup_title": "🧽 Assistente de limpeza",
         "cleanup_caption": "Gera um script shell com as remoções/movimentos sugeridos. **Não apaga nada automaticamente** — revê e corre manualmente.",
@@ -418,6 +429,17 @@ TRANSLATIONS = {
         "tags_none": "No folders tagged yet.",
         "tags_col_path": "Folder",
         "tags_col_tags": "Tags",
+        "tags_filter": "🔍 Filter by tag or path",
+        "tags_filter_empty": "No tags match the filter.",
+        # cross-drive tag search (Compare tab)
+        "tag_search_title": "🔍 Search by tag",
+        "tag_search_caption": "Searches all indexed drives. Matches tag name or folder path.",
+        "tag_search_input": "Tag or path",
+        "tag_search_col_drive": "Drive",
+        "tag_search_col_path": "Folder",
+        "tag_search_col_tags": "Tags",
+        "tag_search_empty": "No tagged folders found.",
+        "tag_search_no_tags": "No tags exist on any drive yet. Use the Map tab to tag folders.",
         # cleanup
         "cleanup_title": "🧽 Cleanup assistant",
         "cleanup_caption": "Generates a shell script of suggested removals/moves. **It does NOT delete anything automatically** — review and run manually.",
@@ -1678,11 +1700,23 @@ with tab_map:
         st.divider()
         st.caption(t("tags_active"))
         if _folder_tags:
-            st.dataframe(
-                [{t("tags_col_path"): p, t("tags_col_tags"): " · ".join(tgs)}
-                 for p, tgs in sorted(_folder_tags.items())],
-                use_container_width=True, hide_index=True,
+            _tag_filter = st.text_input(
+                t("tags_filter"), placeholder="backup", key="tags_filter_input",
+                label_visibility="collapsed",
             )
+            _q = _tag_filter.strip().lower()
+            _filtered = {
+                p: tgs for p, tgs in sorted(_folder_tags.items())
+                if not _q or _q in p.lower() or any(_q in tg.lower() for tg in tgs)
+            }
+            if _filtered:
+                st.dataframe(
+                    [{t("tags_col_path"): p, t("tags_col_tags"): " · ".join(tgs)}
+                     for p, tgs in _filtered.items()],
+                    use_container_width=True, hide_index=True,
+                )
+            else:
+                st.info(t("tags_filter_empty"))
         else:
             st.info(t("tags_none"))
 
@@ -1771,6 +1805,34 @@ with tab_history:
 
 # --- Compare ---
 with tab_compare:
+    # ── cross-drive tag search ───────────────────────────────────────────────
+    st.subheader(t("tag_search_title"))
+    st.caption(t("tag_search_caption"))
+
+    _ts_all = tags_search("")   # all tagged folders across all drives
+    if not _ts_all:
+        st.info(t("tag_search_no_tags"))
+    else:
+        _ts_query = st.text_input(
+            t("tag_search_input"),
+            placeholder="backup",
+            key="tag_search_q",
+        )
+        _ts_results = tags_search(_ts_query) if _ts_query.strip() else _ts_all
+        if _ts_results:
+            st.dataframe(
+                [{
+                    t("tag_search_col_drive"): r["label"],
+                    t("tag_search_col_path"): r["rel_path"],
+                    t("tag_search_col_tags"): " · ".join(r["tags"]),
+                } for r in _ts_results],
+                use_container_width=True, hide_index=True,
+            )
+        else:
+            st.info(t("tag_search_empty"))
+
+    st.divider()
+
     # ── cross-drive dedupe (all drives at once) ──────────────────────────────
     st.subheader(t("cross_title"))
     st.caption(t("cross_caption"))
