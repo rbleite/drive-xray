@@ -1620,16 +1620,24 @@ with tab_map:
         }) if rows else []
 
         _tc1, _tc2 = st.columns([3, 2])
+
+        # persist selected folder across reruns via session_state key
         _sel_folder = _tc1.selectbox(
             t("tags_select"), _map_folders,
-            index=None, placeholder="sequencing/run-2024",
+            index=None,
             key="tags_folder_sel",
         )
-        _current_tags = ", ".join(_folder_tags.get(_sel_folder, [])) if _sel_folder else ""
+        # pre-fill tags input when a folder with existing tags is selected
+        _existing_tags = ", ".join(_folder_tags.get(_sel_folder, [])) if _sel_folder else ""
+        # only pre-fill when the folder changes; let the user edit freely otherwise
+        _input_key = f"tags_input_{_sel_folder}"
+        if st.session_state.get("_tags_last_folder") != _sel_folder:
+            st.session_state["_tags_last_folder"] = _sel_folder
+            st.session_state[_input_key] = _existing_tags
         _tag_input = _tc2.text_input(
-            t("tags_input"), value=_current_tags,
+            t("tags_input"),
             placeholder="backup, importante, NGS",
-            key="tags_input_field",
+            key=_input_key,
         )
 
         _tb1, _tb2 = st.columns(2)
@@ -1637,14 +1645,14 @@ with tab_map:
                        disabled=not _sel_folder, key="tags_save_btn"):
             _new_tags = [x.strip() for x in _tag_input.split(",") if x.strip()]
             tags_set(selected_db, _sel_folder, _new_tags)
-            st.success(t("tags_saved"))
-            st.rerun()
+            _folder_tags = tags_get(selected_db)   # refresh for table below
+            st.toast(t("tags_saved"), icon="✅")
         if _tb2.button(t("tags_remove_btn"),
                        disabled=not _sel_folder or _sel_folder not in _folder_tags,
                        key="tags_remove_btn"):
             tags_set(selected_db, _sel_folder, [])
-            st.success(t("tags_removed"))
-            st.rerun()
+            _folder_tags = tags_get(selected_db)   # refresh for table below
+            st.toast(t("tags_removed"), icon="🗑️")
 
         st.divider()
         st.caption(t("tags_active"))
