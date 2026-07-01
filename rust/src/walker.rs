@@ -8,6 +8,7 @@
 //! downstream (rayon in `index.rs`).
 
 use anyhow::Result;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -59,8 +60,9 @@ pub struct RawEntry {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WalkStats {
-    pub crossed: usize,        // subtrees pruned because they sit on another fs
-    pub cloud_skipped: usize,  // subtrees pruned by --skip-cloud
+    pub crossed: usize,           // subtrees pruned because they sit on another fs
+    pub cloud_skipped: usize,     // subtrees pruned by --skip-cloud
+    pub firmlinks_skipped: usize, // subtrees pruned because inode already visited (APFS firmlinks)
 }
 
 #[derive(Debug, Default)]
@@ -174,11 +176,25 @@ pub fn walk(root: &Path, one_fs: bool, skip_cloud: bool) -> Result<WalkResult> {
     }
     #[cfg(unix)]
     let root_dev = meta_dev(&root_md);
+    #[cfg(unix)]
+    let root_ino = meta_ino(&root_md);
     #[cfg(windows)]
     let root_dev: u64 = win_file_info(&root).map(|(s, _)| s).unwrap_or(0);
 
     let mut entries: Vec<RawEntry> = Vec::new();
     let mut stats = WalkStats::default();
+
+    // Track visited directory (inode, device) pairs to detect APFS firmlinks.
+    // A firmlink looks like a regular directory but shares the same inode as
+    // a path already traversed — e.g. /Users is a firmlink to
+    // /System/Volumes/Data/Users. Without this guard both subtrees get indexed,
+    // doubling all content in the TreeMap. Independent of --one-fs.
+    #[cfg(unix)]
+    let mut visited_dir_inodes: HashSet<(u64, u64)> = {
+        let mut s = HashSet::new();
+        s.insert((root_ino, root_dev));
+        s
+    };
 
     // Root entry first — parent_rel = None signals "this is the top".
     // We deliberately leave mtime / inode / device as NULL to match the
@@ -271,6 +287,14 @@ pub fn walk(root: &Path, one_fs: bool, skip_cloud: bool) -> Result<WalkResult> {
 
                 if one_fs && dir_dev != root_dev {
                     stats.crossed += 1;
+                    continue;
+                }
+
+                // Skip directories whose (inode, device) we've already seen —
+                // this catches APFS firmlinks without --one-fs.
+                #[cfg(unix)]
+                if !visited_dir_inodes.insert((dir_ino, dir_dev)) {
+                    stats.firmlinks_skipped += 1;
                     continue;
                 }
 

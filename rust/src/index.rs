@@ -119,7 +119,10 @@ pub fn index_drive(
     let t0 = Instant::now();
     let walk_res = walker::walk(&root_canon, one_fs, skip_cloud)?;
     let n_walked = walk_res.entries.len();
-    eprintln!("  walk: {} entries in {:.1}s", n_walked, t0.elapsed().as_secs_f64());
+    let stats = &walk_res.stats;
+    eprintln!("  walk: {} entries in {:.1}s (firmlinks_skipped={}, crossed={}, cloud_skipped={})",
+        n_walked, t0.elapsed().as_secs_f64(),
+        stats.firmlinks_skipped, stats.crossed, stats.cloud_skipped);
 
     // -------- phase 2: hash (parallel) --------
     let t1 = Instant::now();
