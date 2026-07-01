@@ -1594,6 +1594,13 @@ with tab_map:
 
         customdata = [r["size_human"] + _tag_suffix(r["rel_path"]) for r in rows]
 
+        # id → rel_path lookup for click-to-select
+        _id_to_relpath = {r["id"]: r["rel_path"] for r in rows}
+        # folder list needed both for click handling and the selectbox below
+        _map_folders = sorted({
+            r["rel_path"] for r in rows if r["kind"] == "folder" and r["rel_path"] != "."
+        })
+
         fig = go.Figure(go.Treemap(
             ids=ids, labels=labels, parents=parents, values=values,
             branchvalues="total",
@@ -1606,15 +1613,29 @@ with tab_map:
             textinfo="label+value",
             texttemplate="<b>%{label}</b><br>%{customdata}",
         ))
-        fig.update_layout(margin=dict(t=10, l=0, r=0, b=0), height=700)
-        st.plotly_chart(fig, use_container_width=True)
+        # clickmode='event+select' makes single-click fire a selection event
+        # which Streamlit's on_select can capture
+        fig.update_layout(margin=dict(t=10, l=0, r=0, b=0), height=700,
+                          clickmode="event+select")
+        _map_event = st.plotly_chart(
+            fig, use_container_width=True,
+            on_select="rerun", key="treemap_plot",
+        )
         st.caption(t("map_legend", n=len(rows)))
+
+        # pre-select clicked folder in the tag editor
+        if _map_event and _map_event.selection and _map_event.selection.get("points"):
+            _clicked_id = str(_map_event.selection["points"][0].get("id", ""))
+            _clicked_rp = _id_to_relpath.get(_clicked_id, "")
+            if _clicked_rp and _clicked_rp != "." and _clicked_rp in _map_folders:
+                if st.session_state.get("tags_folder_sel") != _clicked_rp:
+                    st.session_state["tags_folder_sel"] = _clicked_rp
+                    st.session_state["_tags_last_folder"] = None  # force tag pre-fill
 
     # ── Tag editor ────────────────────────────────────────────────────────────
     with st.expander(t("tags_expander"), expanded=bool(_folder_tags)):
         st.caption(t("tags_caption"))
 
-        # folder selector: paths visible in current map (folders only)
         _map_folders = sorted({
             r["rel_path"] for r in rows if r["kind"] == "folder" and r["rel_path"] != "."
         }) if rows else []
