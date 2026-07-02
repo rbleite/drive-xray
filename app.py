@@ -133,6 +133,8 @@ TRANSLATIONS = {
         "main_welcome_title": "drive-xray",
         "main_welcome_body": "Indexa o teu Mac ou drives externas, encontra ficheiros e pastas duplicados, compara drives offline.\n\nComeça por **indexar uma drive** na barra lateral.",
         "no_metadata_error": "`{name}` não contém metadados de drive. Re-indexa.",
+        "drive_busy": "⏳ `{name}` está ocupada — indexação/refresh em curso. Os dados estão intactos; espera que termine.",
+        "drive_busy_retry": "🔄 Tentar de novo",
         "indexed_on": "indexada em",
         "tab_summary": "📊 Resumo",
         "tab_dupes": "🔁 Duplicados",
@@ -392,6 +394,8 @@ TRANSLATIONS = {
         "main_welcome_title": "drive-xray",
         "main_welcome_body": "Index your Mac or external drives, find duplicate files and folders, compare drives offline.\n\nStart by **indexing a drive** in the sidebar.",
         "no_metadata_error": "`{name}` has no drive metadata. Please re-index.",
+        "drive_busy": "⏳ `{name}` is busy — an index/refresh is in progress. Your data is intact; wait for it to finish.",
+        "drive_busy_retry": "🔄 Try again",
         "indexed_on": "indexed on",
         "tab_summary": "📊 Summary",
         "tab_dupes": "🔁 Duplicates",
@@ -694,7 +698,10 @@ def list_dbs() -> list[Path]:
     return sorted(known.keys())
 
 
-def drive_info(db: Path) -> dict | None:
+DRIVE_LOCKED = "__locked__"  # sentinel: db busy (e.g. an index/refresh is writing)
+
+
+def drive_info(db: Path) -> dict | str | None:
     try:
         conn = open_db(db)
         row = conn.execute(
@@ -707,6 +714,13 @@ def drive_info(db: Path) -> dict | None:
             "SELECT COUNT(*) FROM snapshots"
         ).fetchone()[0]
         conn.close()
+    except sqlite3.OperationalError as e:
+        # "database is locked" during an in-progress index/refresh is transient,
+        # NOT missing metadata — surface it distinctly so we don't tell the user
+        # to re-index a perfectly good drive.
+        if "locked" in str(e).lower():
+            return DRIVE_LOCKED
+        return None
     except sqlite3.DatabaseError:
         return None
     if not row:
@@ -1370,6 +1384,11 @@ if selected_db is None:
     st.stop()
 
 info = drive_info(selected_db)
+if info == DRIVE_LOCKED:
+    st.info(t("drive_busy", name=selected_db.name))
+    if st.button(t("drive_busy_retry"), key="drive_busy_retry_btn"):
+        st.rerun()
+    st.stop()
 if info is None:
     st.error(t("no_metadata_error", name=selected_db.name))
     st.stop()
