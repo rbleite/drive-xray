@@ -36,6 +36,8 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+import yaml
+
 PARTIAL_CHUNK = 64 * 1024
 READ_CHUNK = 1024 * 1024
 # Bump when partial_hash() algorithm changes. Stored per drive in `drive.hash_version`.
@@ -77,11 +79,14 @@ def is_cloud_dir(name: str) -> bool:
 
 # ---------------------------------------------------------------------------
 # Auto-tag rules — map sets of file extensions to a human label.
-# Compound extensions (.fastq.gz, .vcf.gz, .tar.gz …) are handled by
-# _file_ext() below.  Rules are checked in order; a folder can receive
-# multiple tags if files with different rule-sets are present.
+#
+# The built-in defaults below are used unless the user provides an editable
+# override at AUTO_TAGS_YAML_PATH (~/.config/drive-xray/auto_tags.yaml), in
+# which case that file wins entirely. Format:  <tag>: [ext1, ext2, ...].
+# Compound extensions (fastq.gz, vcf.gz, tar.gz …) are handled by _file_ext().
+# Rules apply in order; a folder can receive multiple tags.
 # ---------------------------------------------------------------------------
-AUTO_TAG_RULES: list[tuple[frozenset, str]] = [
+DEFAULT_AUTO_TAG_RULES: list[tuple[frozenset, str]] = [
     # Genomics — sequencing technology / data type
     (frozenset({"pod5", "fast5", "blow5"}),
         "nanopore"),
@@ -130,15 +135,84 @@ AUTO_TAG_RULES: list[tuple[frozenset, str]] = [
         "base de dados"),
 ]
 
+# Back-compat alias (older code / tests referenced AUTO_TAG_RULES directly).
+AUTO_TAG_RULES = DEFAULT_AUTO_TAG_RULES
 
-def _file_ext(name: str) -> str:
+# Kept in sync with CONFIG_PATH's directory (defined later in the file); set
+# directly here to avoid a load-order dependency on that later definition.
+AUTO_TAGS_YAML_PATH = Path.home() / ".config" / "drive-xray" / "auto_tags.yaml"
+
+
+def _rules_to_ordered_dict(rules: list[tuple[frozenset, str]]) -> dict:
+    """{tag: [ext, ...]} preserving rule order, for YAML round-tripping.
+    Extensions are sorted for stable output."""
+    return {tag: sorted(exts) for exts, tag in rules}
+
+
+def get_auto_tag_rules() -> list[tuple[frozenset, str]]:
+    """Return the active auto-tag rules: the user's YAML override if present
+    and parseable, otherwise the built-in defaults. Never raises — a broken
+    override silently falls back to defaults."""
+    if AUTO_TAGS_YAML_PATH.exists():
+        try:
+            data = yaml.safe_load(AUTO_TAGS_YAML_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data:
+                rules: list[tuple[frozenset, str]] = []
+                for tag, exts in data.items():
+                    if not exts:
+                        continue
+                    clean = frozenset(
+                        str(e).lower().lstrip(".").strip()
+                        for e in exts if str(e).strip()
+                    )
+                    if clean:
+                        rules.append((clean, str(tag)))
+                if rules:
+                    return rules
+        except Exception:
+            pass
+    return DEFAULT_AUTO_TAG_RULES
+
+
+def _active_compounds(rules: list[tuple[frozenset, str]]) -> tuple[str, ...]:
+    """Compound extensions (those containing a dot, e.g. fastq.gz) present in
+    the active rules — longest first so `_file_ext` matches greedily."""
+    compounds = {e for exts, _ in rules for e in exts if "." in e}
+    return tuple(sorted(compounds, key=lambda c: (-c.count("."), -len(c), c)))
+
+
+def write_default_auto_tag_rules(overwrite: bool = False) -> Path:
+    """Write the built-in defaults to AUTO_TAGS_YAML_PATH as an editable
+    template and return the path. If the file already exists and overwrite is
+    False, leaves it untouched (still returns the path)."""
+    if AUTO_TAGS_YAML_PATH.exists() and not overwrite:
+        return AUTO_TAGS_YAML_PATH
+    AUTO_TAGS_YAML_PATH.parent.mkdir(parents=True, exist_ok=True)
+    header = (
+        "# drive-xray auto-tag rules — edit freely.\n"
+        "# Format:  <tag>: [ext1, ext2, ...]\n"
+        "# Extensions are case-insensitive; compound extensions like\n"
+        "# fastq.gz / vcf.gz / tar.gz work. A folder gets a tag when it\n"
+        "# contains at least one file with a matching extension.\n"
+        "# Delete this file to restore the built-in defaults.\n\n"
+    )
+    body = yaml.safe_dump(
+        _rules_to_ordered_dict(DEFAULT_AUTO_TAG_RULES),
+        default_flow_style=None, sort_keys=False, allow_unicode=True,
+    )
+    AUTO_TAGS_YAML_PATH.write_text(header + body, encoding="utf-8")
+    return AUTO_TAGS_YAML_PATH
+
+
+def _file_ext(name: str, compounds: tuple[str, ...] | None = None) -> str:
     """Return the meaningful extension of a filename.
-    Handles compound extensions like .fastq.gz, .vcf.gz, .tar.gz."""
+    Handles compound extensions (fastq.gz, vcf.gz, tar.gz …). `compounds`
+    should be longest-first; when None, a built-in default set is used."""
+    if compounds is None:
+        compounds = ("fastq.gz", "fq.gz", "vcf.gz", "gvcf.gz", "bcf.gz",
+                     "tar.gz", "tar.bz2", "tar.xz")
     low = name.lower()
-    for compound in (
-        "fastq.gz", "fq.gz", "vcf.gz", "gvcf.gz", "bcf.gz",
-        "tar.gz", "tar.bz2", "tar.xz",
-    ):
+    for compound in compounds:
         if low.endswith("." + compound):
             return compound
     dot = low.rfind(".")
@@ -147,8 +221,9 @@ def _file_ext(name: str) -> str:
 
 def compute_auto_tags(db_path: "Path") -> dict[str, list[str]]:
     """Derive tags per folder from file extensions in the latest snapshot.
-    Returns {rel_path: [tag, ...]}. Result is not persisted — callers should
-    cache it (e.g. in st.session_state keyed by db mtime)."""
+    Uses the active rules (user YAML override or built-in defaults). Returns
+    {rel_path: [tag, ...]}. Result is not persisted — callers should cache it
+    (e.g. in st.session_state keyed by db mtime)."""
     if not db_path.exists():
         return {}
     try:
@@ -164,19 +239,22 @@ def compute_auto_tags(db_path: "Path") -> dict[str, list[str]]:
     except Exception:
         return {}
 
+    rules = get_auto_tag_rules()
+    compounds = _active_compounds(rules)
+
     from collections import defaultdict
     folder_exts: dict[str, set] = defaultdict(set)
     for (rp,) in rows:
         slash = rp.rfind("/")
         parent = rp[:slash] if slash >= 0 else "."
         name = rp[slash + 1:] if slash >= 0 else rp
-        ext = _file_ext(name)
+        ext = _file_ext(name, compounds)
         if ext:
             folder_exts[parent].add(ext)
 
     result: dict[str, list[str]] = {}
     for folder, exts in folder_exts.items():
-        tags = [tag for rule_exts, tag in AUTO_TAG_RULES if exts & rule_exts]
+        tags = [tag for rule_exts, tag in rules if exts & rule_exts]
         if tags:
             result[folder] = tags
     return result
@@ -2479,6 +2557,122 @@ def single_copy_files(
     }
 
 
+def cold_data(
+    db_path: Path,
+    older_than_days: int = 730,
+    min_size: int = 100 * 1024 * 1024,
+    max_rows: int = 1000,
+) -> dict:
+    """Find 'cold' folders — archive candidates whose newest file predates a
+    cutoff. For each folder, the reference time is the MOST RECENT mtime among
+    all files anywhere beneath it (a folder's own mtime is misleading: it does
+    not change when a deep descendant is modified).
+
+    Reports *maximal* cold folders: the highest point of each cold subtree
+    (a cold folder whose parent is not cold, or whose parent is the root). This
+    yields clean archive units — "this entire tree is untouched since <date>"
+    — instead of every nested subfolder. Maximal candidates never nest, so
+    their sizes are disjoint and sum without double-counting.
+
+    Args:
+        db_path: an indexed drive .db.
+        older_than_days: a folder is cold when its newest file is older.
+        min_size: ignore candidate folders smaller than this (total bytes).
+        max_rows: cap the returned candidate list (largest first); `total_*`
+            always reflect the full set.
+
+    Returns:
+        {
+          "cutoff_iso": str, "older_than_days": int,
+          "candidates": [{"folder","size","newest_iso","file_count"}, ...] size desc,
+          "total_bytes": int, "total_folders": int, "truncated": bool,
+        }
+    """
+    empty = {
+        "cutoff_iso": "", "older_than_days": older_than_days,
+        "candidates": [], "total_bytes": 0, "total_folders": 0,
+        "truncated": False,
+    }
+    if not db_path.exists():
+        return empty
+    try:
+        conn = open_db(db_path)
+        sid = latest_snapshot_id(conn)
+        if sid is None:
+            conn.close()
+            return empty
+        rows = conn.execute(
+            "SELECT rel_path, size, mtime FROM entries"
+            " WHERE snapshot_id=? AND is_dir=0 AND error IS NULL"
+            "   AND mtime IS NOT NULL",
+            (sid,),
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return empty
+
+    cutoff = time.time() - older_than_days * 86400
+
+    # Per-folder rollup over ALL descendant files: [newest_mtime, bytes, count].
+    agg: dict[str, list] = {}
+    for rel, size, mtime in rows:
+        size = size or 0
+        parts = rel.split("/")
+        # ancestor folders: root plus every proper directory prefix
+        ancestors = ["."]
+        for k in range(1, len(parts)):
+            ancestors.append("/".join(parts[:k]))
+        for f in ancestors:
+            a = agg.get(f)
+            if a is None:
+                agg[f] = [mtime, size, 1]
+            else:
+                if mtime > a[0]:
+                    a[0] = mtime
+                a[1] += size
+                a[2] += 1
+
+    cold = {f for f, (mx, _sz, _c) in agg.items() if mx < cutoff}
+
+    def _parent(f: str) -> str | None:
+        if f == ".":
+            return None
+        s = f.rfind("/")
+        return f[:s] if s >= 0 else "."
+
+    # maximal cold folders: break at the top of each cold subtree, and always
+    # break at top-level (a cold root '.' means the whole drive is cold — we
+    # still list its top folders rather than the drive itself).
+    candidates = []
+    for f in cold:
+        if f == ".":
+            continue
+        par = _parent(f)
+        if par not in cold or par == ".":
+            mx, sz, cnt = agg[f]
+            if sz >= min_size:
+                candidates.append({
+                    "folder": f,
+                    "size": sz,
+                    "newest_iso": datetime.datetime.fromtimestamp(mx)
+                                          .isoformat(timespec="seconds"),
+                    "file_count": cnt,
+                })
+
+    candidates.sort(key=lambda c: -c["size"])
+    total_bytes = sum(c["size"] for c in candidates)
+    total_folders = len(candidates)
+    return {
+        "cutoff_iso": datetime.datetime.fromtimestamp(cutoff)
+                              .isoformat(timespec="seconds"),
+        "older_than_days": older_than_days,
+        "candidates": candidates[:max_rows],
+        "total_bytes": total_bytes,
+        "total_folders": total_folders,
+        "truncated": total_folders > max_rows,
+    }
+
+
 def read_drive_index_opts(db_labels: list[tuple[Path, str]]) -> dict[str, dict]:
     """Return {label: {"one_fs": bool, "skip_cloud": bool}} from each db's
     drive table. Drives that can't be read are omitted."""
@@ -2618,6 +2812,15 @@ def main():
                                    help="set the folder where .db files are saved")
     pcfg_set.add_argument("path", type=Path, help="new db folder path")
 
+    pat = sub.add_parser(
+        "auto-tags",
+        help="show or initialise the editable auto-tag rules (YAML)",
+    )
+    pat.add_argument("--init", action="store_true",
+                     help="write the default rules as an editable YAML template")
+    pat.add_argument("--force", action="store_true",
+                     help="with --init, overwrite an existing file")
+
     pxd = sub.add_parser(
         "cross-dedupe",
         help="find duplicate files across multiple drives (works offline)",
@@ -2646,6 +2849,21 @@ def main():
     psc.add_argument("--drive", dest="target", metavar="LABEL", default=None,
                      help="only report at-risk files on this drive")
     psc.add_argument("--json", action="store_true",
+                     help="emit the full result as JSON")
+
+    pco = sub.add_parser(
+        "cold",
+        help="find cold folders (archive candidates) not touched in N years",
+    )
+    pco.add_argument("db", type=Path)
+    pco.add_argument("--years", type=float, default=2.0,
+                     help="cold if newest file is older than this (default 2)")
+    pco.add_argument("--days", type=int, default=None,
+                     help="cold cutoff in days (overrides --years)")
+    pco.add_argument("--min-size", type=int, default=100 * 1024 * 1024,
+                     metavar="BYTES",
+                     help="ignore folders smaller than this (default 100 MB)")
+    pco.add_argument("--json", action="store_true",
                      help="emit the full result as JSON")
 
     args = p.parse_args()
@@ -2759,6 +2977,26 @@ def main():
             cfg["db_dir"] = str(p)
             write_config(cfg)
             print(f"  db_dir set to: {p}")
+    elif args.cmd == "auto-tags":
+        if args.init:
+            existed = AUTO_TAGS_YAML_PATH.exists()
+            path = write_default_auto_tag_rules(overwrite=args.force)
+            if existed and not args.force:
+                print(f"  already exists (use --force to overwrite): {path}")
+            else:
+                print(f"  wrote editable auto-tag rules → {path}")
+        else:
+            src = ("YAML override" if AUTO_TAGS_YAML_PATH.exists()
+                   else "built-in defaults")
+            rules = get_auto_tag_rules()
+            print(f"  source: {src}")
+            print(f"  file:   {AUTO_TAGS_YAML_PATH}"
+                  f"{'' if AUTO_TAGS_YAML_PATH.exists() else '  (not present)'}")
+            print(f"  {len(rules)} rules:")
+            for exts, tag in rules:
+                print(f"    {tag:<16}  {', '.join(sorted(exts))}")
+            if src == "built-in defaults":
+                print("\n  run `dx auto-tags --init` to create an editable copy")
     elif args.cmd == "drives":
         entries = registry_list()
         if not entries:
@@ -2849,6 +3087,23 @@ def main():
                     print(f"    {human(f['bytes']):>10}  [{f['drive']}]  {f['folder']}/")
             if result["truncated"]:
                 print(f"\n  (file list capped; {result['at_risk_count']:,} items total)",
+                      file=sys.stderr)
+
+    elif args.cmd == "cold":
+        days = args.days if args.days is not None else int(args.years * 365)
+        result = cold_data(args.db, older_than_days=days, min_size=args.min_size)
+        if args.json:
+            print(json.dumps(result))
+        else:
+            yrs = days / 365
+            print(f"cold folders older than {yrs:.1f}y (before {result['cutoff_iso']}): "
+                  f"{result['total_folders']} folders · "
+                  f"{human(result['total_bytes'])} archivable\n", file=sys.stderr)
+            for c in result["candidates"][:40]:
+                print(f"  {human(c['size']):>10}  {c['newest_iso'][:10]}  "
+                      f"{c['folder']}/  ({c['file_count']} files)")
+            if result["truncated"]:
+                print(f"\n  (list capped; {result['total_folders']:,} folders total)",
                       file=sys.stderr)
 
 

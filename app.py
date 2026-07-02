@@ -28,11 +28,12 @@ from drive_xray import (
     CLEANUP_STRATEGIES, CLEANUP_ACTIONS,
     latest_snapshot_id, list_snapshots, diff_snapshots,
     registry_list, registry_remove, registry_register,
-    cross_dedupe, single_copy_files, read_drive_index_opts,
+    cross_dedupe, single_copy_files, cold_data, read_drive_index_opts,
     verify_file, execute_file_action, QUARANTINE_DIR, AUDIT_LOG,
     read_config, write_config, get_db_dir, import_folder,
     tags_get, tags_set, tags_search, notes_get, notes_set,
-    compute_auto_tags,
+    compute_auto_tags, AUTO_TAGS_YAML_PATH, write_default_auto_tag_rules,
+    get_auto_tag_rules,
 )
 
 DB_DIR = get_db_dir()
@@ -258,6 +259,28 @@ TRANSLATIONS = {
         "auto_tags_detected": "Detetado automaticamente",
         "auto_tags_promote": "⬆️ Usar como tags manuais",
         "auto_tags_legend_note": "pastas com tags automáticas (sem tag manual)",
+        "at_rules_title": "⚙️ Regras de auto-tag ({n} regras)",
+        "at_rules_src_default": "A usar as regras predefinidas (embutidas).",
+        "at_rules_src_custom": "A usar o teu ficheiro de regras personalizado.",
+        "at_rules_init_btn": "Criar ficheiro editável",
+        "at_rules_edit_hint": "Edita este ficheiro (formato `tag: [ext1, ext2]`); as alterações aplicam-se de imediato.",
+        "at_rules_path": "Ficheiro de regras",
+        "at_rules_created": "Ficheiro criado — edita-o para personalizar as regras.",
+        # cold data (archive candidates) — Map tab
+        "cold_title": "❄️ Dados frios (candidatos a arquivo)",
+        "cold_caption": "Pastas cujo ficheiro mais recente é anterior ao limite — candidatas a arquivo/cold storage. Mostra o topo de cada subárvore fria.",
+        "cold_years": "Mais antigo que (anos)",
+        "cold_btn": "Procurar dados frios",
+        "cold_none": "✅ Nenhuma pasta fria acima do tamanho mínimo com este limite.",
+        "cold_metric_folders": "Pastas frias",
+        "cold_metric_bytes": "Total arquivável",
+        "cold_metric_cutoff": "Anterior a",
+        "cold_col_folder": "pasta",
+        "cold_col_size": "tamanho",
+        "cold_col_newest": "ficheiro mais recente",
+        "cold_col_files": "nº ficheiros",
+        "cold_download_csv": "⬇️ Exportar CSV (todas as pastas frias)",
+        "cold_truncated": "Tabela mostra as maiores {shown} de {total} pastas; o CSV inclui todas.",
         # cross-drive tag search (Compare tab)
         "tag_search_title": "🔍 Pesquisar por etiqueta",
         "tag_search_caption": "Procura em todas as drives indexadas. Corresponde à etiqueta, ao caminho ou à nota.",
@@ -495,6 +518,28 @@ TRANSLATIONS = {
         "auto_tags_detected": "Auto-detected",
         "auto_tags_promote": "⬆️ Use as manual tags",
         "auto_tags_legend_note": "folders with auto-detected tags (no manual tag)",
+        "at_rules_title": "⚙️ Auto-tag rules ({n} rules)",
+        "at_rules_src_default": "Using the built-in default rules.",
+        "at_rules_src_custom": "Using your custom rules file.",
+        "at_rules_init_btn": "Create editable file",
+        "at_rules_edit_hint": "Edit this file (format `tag: [ext1, ext2]`); changes apply immediately.",
+        "at_rules_path": "Rules file",
+        "at_rules_created": "File created — edit it to customise the rules.",
+        # cold data (archive candidates) — Map tab
+        "cold_title": "❄️ Cold data (archive candidates)",
+        "cold_caption": "Folders whose newest file predates the cutoff — candidates for archival/cold storage. Shows the top of each cold subtree.",
+        "cold_years": "Older than (years)",
+        "cold_btn": "Find cold data",
+        "cold_none": "✅ No cold folders above the minimum size at this cutoff.",
+        "cold_metric_folders": "Cold folders",
+        "cold_metric_bytes": "Total archivable",
+        "cold_metric_cutoff": "Older than",
+        "cold_col_folder": "folder",
+        "cold_col_size": "size",
+        "cold_col_newest": "newest file",
+        "cold_col_files": "files",
+        "cold_download_csv": "⬇️ Export CSV (all cold folders)",
+        "cold_truncated": "Table shows the largest {shown} of {total} folders; the CSV has them all.",
         # cross-drive tag search (Compare tab)
         "tag_search_title": "🔍 Search by tag",
         "tag_search_caption": "Searches all indexed drives. Matches tag name, folder path, or note.",
@@ -1668,10 +1713,15 @@ with tab_map:
     # auto-tags — computed from file extensions in latest snapshot, cached by db mtime
     _at_mtime_key = f"_at_mtime_{selected_db}"
     _at_data_key  = f"_auto_tags_{selected_db}"
+    # cache key = (db mtime, rules-file mtime) so editing the YAML rules busts
+    # the cache immediately, no restart needed.
     _db_mtime = selected_db.stat().st_mtime if selected_db.exists() else 0
-    if st.session_state.get(_at_mtime_key) != _db_mtime:
+    _rules_mtime = (AUTO_TAGS_YAML_PATH.stat().st_mtime
+                    if AUTO_TAGS_YAML_PATH.exists() else 0)
+    _at_key = (_db_mtime, _rules_mtime)
+    if st.session_state.get(_at_mtime_key) != _at_key:
         st.session_state[_at_data_key]  = compute_auto_tags(selected_db)
-        st.session_state[_at_mtime_key] = _db_mtime
+        st.session_state[_at_mtime_key] = _at_key
     _auto_tags: dict = st.session_state.get(_at_data_key, {})
 
     # colour palette — auto-assigned per unique tag (alphabetical order)
@@ -1873,6 +1923,79 @@ with tab_map:
                 st.info(t("tags_filter_empty"))
         else:
             st.info(t("tags_none"))
+
+    # ── auto-tag rules (editable YAML) ────────────────────────────────────────
+    _at_rules = get_auto_tag_rules()
+    with st.expander(t("at_rules_title", n=len(_at_rules)), expanded=False):
+        _rules_custom = AUTO_TAGS_YAML_PATH.exists()
+        st.caption(t("at_rules_src_custom") if _rules_custom
+                   else t("at_rules_src_default"))
+        if _rules_custom:
+            st.text_input(t("at_rules_path"), value=str(AUTO_TAGS_YAML_PATH),
+                          disabled=True, key="at_rules_path_display")
+            st.caption(t("at_rules_edit_hint"))
+        else:
+            if st.button(t("at_rules_init_btn"), key="at_rules_init"):
+                _p = write_default_auto_tag_rules()
+                st.toast(t("at_rules_created"), icon="⚙️")
+                st.rerun()
+        st.dataframe(
+            [{t("tags_col_tags"): _tag, "ext": ", ".join(sorted(_exts))}
+             for _exts, _tag in _at_rules],
+            use_container_width=True, hide_index=True,
+        )
+
+    # ── cold data (archive candidates) ────────────────────────────────────────
+    with st.expander(t("cold_title"), expanded=False):
+        st.caption(t("cold_caption"))
+        _cd_c1, _cd_c2 = st.columns(2)
+        _cd_years = _cd_c1.slider(t("cold_years"), 0.5, 10.0, 2.0, 0.5,
+                                  key="cold_years")
+        _cd_min_mb = _cd_c2.slider(t("minimum_mb"), 0, 2000, 100, key="cold_min")
+        if st.button(t("cold_btn"), type="primary", key="cold_run"):
+            with st.spinner(t("calculating")):
+                st.session_state["cold_result"] = cold_data(
+                    selected_db,
+                    older_than_days=int(_cd_years * 365),
+                    min_size=_cd_min_mb * 1024 * 1024,
+                    max_rows=5000,
+                )
+            st.session_state["cold_result_db"] = str(selected_db)
+
+        if ("cold_result" in st.session_state
+                and st.session_state.get("cold_result_db") == str(selected_db)):
+            _cd = st.session_state["cold_result"]
+            if _cd["total_folders"] == 0:
+                st.success(t("cold_none"))
+            else:
+                _cm1, _cm2, _cm3 = st.columns(3)
+                _cm1.metric(t("cold_metric_folders"), f"{_cd['total_folders']:,}")
+                _cm2.metric(t("cold_metric_bytes"), human(_cd["total_bytes"]))
+                _cm3.metric(t("cold_metric_cutoff"), _cd["cutoff_iso"][:10])
+
+                import csv as _cd_csv, io as _cd_io
+                _cd_buf = _cd_io.StringIO()
+                _cd_w = _cd_csv.writer(_cd_buf)
+                _cd_w.writerow(["folder", "size_bytes", "size_human",
+                                "newest_file", "file_count"])
+                for _c in _cd["candidates"]:
+                    _cd_w.writerow([_c["folder"], _c["size"], human(_c["size"]),
+                                    _c["newest_iso"], _c["file_count"]])
+                st.download_button(
+                    t("cold_download_csv"), data=_cd_buf.getvalue().encode(),
+                    file_name="cold-data.csv", mime="text/csv", key="cold_csv",
+                )
+                st.dataframe(
+                    [{t("cold_col_folder"): _c["folder"] + "/",
+                      t("cold_col_size"): human(_c["size"]),
+                      t("cold_col_newest"): _c["newest_iso"][:10],
+                      t("cold_col_files"): _c["file_count"]}
+                     for _c in _cd["candidates"][:1000]],
+                    use_container_width=True, hide_index=True,
+                )
+                if len(_cd["candidates"]) > 1000:
+                    st.caption(t("cold_truncated", shown=1000,
+                                 total=_cd["total_folders"]))
 
 # --- History ---
 with tab_history:
