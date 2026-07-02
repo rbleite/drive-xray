@@ -119,6 +119,16 @@ pub fn index_drive(
     let bulk_reindex = matches!(mode, Mode::Fresh | Mode::Refresh);
     if bulk_reindex {
         db::drop_entries_indexes(&conn)?;
+        // CRITICAL: `entries` has a self-referential FK (parent_id -> id).
+        // With foreign_keys=ON, deleting each row triggers a reverse lookup
+        // for referencing children; without idx_snap_parent (just dropped)
+        // that lookup is a full table scan → the snapshot DELETE below becomes
+        // O(n²) on a 4M-row table (hours). We're replacing a whole snapshot
+        // (parents and children go together), so FK enforcement adds nothing
+        // here — disable it on this connection for the bulk delete. write_phase
+        // uses its own connection (FK on) and its inserts check the parent via
+        // the always-present PK on entries(id), so they stay both fast & safe.
+        conn.pragma_update(None, "foreign_keys", "OFF")?;
     }
 
     // -------- phase 0: snapshot allocation / cleanup --------
