@@ -135,6 +135,7 @@ TRANSLATIONS = {
         "no_metadata_error": "`{name}` não contém metadados de drive. Re-indexa.",
         "drive_busy": "⏳ `{name}` está ocupada — indexação/refresh em curso. Os dados estão intactos; espera que termine.",
         "drive_busy_retry": "🔄 Tentar de novo",
+        "drive_indexing": "⏳ a indexar… (PID {pid})",
         "indexed_on": "indexada em",
         "tab_summary": "📊 Resumo",
         "tab_dupes": "🔁 Duplicados",
@@ -396,6 +397,7 @@ TRANSLATIONS = {
         "no_metadata_error": "`{name}` has no drive metadata. Please re-index.",
         "drive_busy": "⏳ `{name}` is busy — an index/refresh is in progress. Your data is intact; wait for it to finish.",
         "drive_busy_retry": "🔄 Try again",
+        "drive_indexing": "⏳ indexing… (PID {pid})",
         "indexed_on": "indexed on",
         "tab_summary": "📊 Summary",
         "tab_dupes": "🔁 Duplicates",
@@ -683,6 +685,43 @@ def start_compact(db: Path) -> None:
 
 def start_snapshot(db: Path) -> None:
     _spawn([*DX_CMD, "snapshot", "take", str(db)], db.stem)
+
+
+@st.cache_data(ttl=3, show_spinner=False)
+def _active_index_procs() -> dict:
+    """Map resolved-db-path -> pid for any live `dx` index/refresh/snapshot/
+    compact subprocess. Reflects real OS state — survives reruns, hot-reloads,
+    error pages and app restarts, unlike the session-scoped `idx_proc`. This is
+    what prevents a second refresh from being launched over a running one.
+    Cached for 3s so we don't run `ps` on every micro-rerun."""
+    try:
+        out = subprocess.run(
+            ["ps", "-Ao", "pid=,command="],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except Exception:
+        return {}
+    procs: dict[str, int] = {}
+    subs = ("refresh", "index", "snapshot", "compact")
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or " <defunct>" in line:
+            continue  # skip zombies — they hold no lock
+        if not any(f" {s}" in line for s in subs):
+            continue
+        parts = line.split()
+        try:
+            pid = int(parts[0])
+        except (ValueError, IndexError):
+            continue
+        for tok in parts[1:]:
+            if tok.endswith(".db"):
+                try:
+                    procs[str(Path(tok).resolve())] = pid
+                except Exception:
+                    procs[tok] = pid
+                break
+    return procs
 
 
 # ---------- db helpers ----------
@@ -1073,11 +1112,13 @@ with st.sidebar:
     st.title("💾 drive-xray")
     st.caption(f"engine: {'🦀 Rust' if DX_IS_RUST else '🐍 Python'}  ·  `{DX_CMD[0]}`")
 
-    # whether an indexer/refresher is currently running
+    # whether an indexer/refresher is currently running (this session)
     proc_running = (
         st.session_state.get("idx_proc") is not None
         and st.session_state.idx_proc.poll() is None
     )
+    # ground-truth map of drives with a live dx write-process (any session)
+    _busy_procs = _active_index_procs()
 
     # drives list with refresh + delete buttons
     dbs = list_dbs()
@@ -1100,8 +1141,15 @@ with st.sidebar:
             _reg = _reg_entries.get(db.resolve(), {})
             _display_label = _reg.get("label", db.stem)
             is_current = (current_path == str(db))
+            # is THIS drive being indexed/refreshed right now?
+            _db_pid = _busy_procs.get(str(db.resolve()))
+            _db_busy = _db_pid is not None
+            # disable write actions if a process is touching this db (real OS
+            # state) or this session spawned one that's still alive.
+            _write_disabled = proc_running or _db_busy
             if c1.button(
-                ("▶ " if is_current else "   ") + _display_label,
+                (("⏳ " if _db_busy else ("▶ " if is_current else "   "))
+                 + _display_label),
                 key=f"sel_{db}",
                 use_container_width=True,
                 type="primary" if is_current else "secondary",
@@ -1115,21 +1163,30 @@ with st.sidebar:
                 st.rerun()
             if c3.button(
                 "📸", key=f"snap_{db}", help=t("snapshot_tooltip"),
-                disabled=proc_running,
+                disabled=_write_disabled,
             ):
                 start_snapshot(db)
                 st.rerun()
             if c4.button(
                 "🔄", key=f"ref_{db}", help=t("refresh_tooltip"),
-                disabled=proc_running,
+                disabled=_write_disabled,
             ):
-                start_refresh(db)
-                st.rerun()
+                # belt-and-suspenders: bypass the 3s cache and re-check the OS
+                # right before spawning, so a stale render can't launch a
+                # second concurrent writer over a running one.
+                _active_index_procs.clear()
+                if _active_index_procs().get(str(db.resolve())):
+                    st.rerun()  # already indexing — refuse silently
+                else:
+                    start_refresh(db)
+                    st.rerun()
             if c5.button(
                 "🗑️", key=f"del_{db}", help=t("delete_tooltip"),
             ):
                 st.session_state.pending_delete = str(db)
                 st.rerun()
+            if _db_busy:
+                c1.caption(t("drive_indexing", pid=_db_pid))
         if current_path:
             selected_db = Path(current_path)
     else:
@@ -1151,7 +1208,8 @@ with st.sidebar:
             t("skip_cloud_label"), value=True, help=t("skip_cloud_help"),
         )
         submitted = st.form_submit_button(
-            t("index_button"), type="primary", disabled=proc_running,
+            t("index_button"), type="primary",
+            disabled=proc_running or bool(_busy_procs),
         )
 
     if submitted:
@@ -1414,7 +1472,8 @@ with tab_summary:
         db_size += wal.stat().st_size
     c4.metric(t("db_size"), human(db_size))
     if st.button(t("compact_button"), help=t("compact_help"),
-                 disabled=proc_running):
+                 disabled=proc_running
+                 or str(selected_db.resolve()) in _busy_procs):
         start_compact(selected_db)
         st.rerun()
 
@@ -2028,7 +2087,9 @@ with tab_history:
         c1, c2 = st.columns([3, 1])
         c1.subheader(t("history_title", n=len(snaps)))
         if c2.button(t("snapshot_button"), type="primary",
-                     disabled=proc_running, key="snap_btn_history"):
+                     disabled=proc_running
+                     or str(selected_db.resolve()) in _busy_procs,
+                     key="snap_btn_history"):
             start_snapshot(selected_db)
             st.rerun()
 
