@@ -111,6 +111,16 @@ pub fn index_drive(
 
     let conn = db::open_db(db_path)?;
 
+    // Bulk-load optimization (Fresh / Refresh only): drop the entries indexes
+    // so the DELETE below and the INSERTs in write_phase don't pay per-row
+    // index maintenance — on a multi-million-row table that dominates runtime.
+    // Rebuilt in a single pass after write_phase. Snapshot mode is excluded so
+    // we don't rebuild indexes over accumulated history to add one snapshot.
+    let bulk_reindex = matches!(mode, Mode::Fresh | Mode::Refresh);
+    if bulk_reindex {
+        db::drop_entries_indexes(&conn)?;
+    }
+
     // -------- phase 0: snapshot allocation / cleanup --------
     let snap_id = allocate_snapshot(&conn, label, one_fs, skip_cloud,
                                      mode, target_snapshot_id)?;
@@ -145,6 +155,16 @@ pub fn index_drive(
         "  write: {} files / {} dirs / {} bytes in {:.1}s",
         total_files, total_dirs, total_size, t2.elapsed().as_secs_f64()
     );
+
+    // -------- rebuild indexes (paired with the earlier drop) --------
+    if bulk_reindex {
+        let t_idx = Instant::now();
+        // execute_batch runs CREATE INDEX IF NOT EXISTS from SCHEMA_V5,
+        // rebuilding the entries indexes in one bulk pass over the final rows.
+        conn.execute_batch(db::SCHEMA_V5)?;
+        eprintln!("  reindex: entries indexes rebuilt in {:.1}s",
+                  t_idx.elapsed().as_secs_f64());
+    }
 
     // -------- final: update drive row + snapshot totals --------
     let conn2 = db::open_db(db_path)?;

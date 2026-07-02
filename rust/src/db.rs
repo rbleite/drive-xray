@@ -110,6 +110,28 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Drop the five `entries` indexes so a bulk delete/insert doesn't pay
+/// per-row index maintenance — on a multi-million-row table that dominates
+/// runtime (a 4M-row in-place delete went from ~50 min to ~2 s in testing).
+/// Rebuild them afterwards with `execute_batch(SCHEMA_V5)`.
+///
+/// The `paths` index (idx_paths_parent_seg) is intentionally NOT dropped —
+/// `intern_path` relies on it during the write phase.
+///
+/// Crash-safety: `open_db` runs `CREATE INDEX IF NOT EXISTS` on every open,
+/// so an interrupted run (indexes dropped, never rebuilt) self-heals on the
+/// next open — the db stays correct, just unindexed until then.
+pub fn drop_entries_indexes(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_snap_path_id;
+         DROP INDEX IF EXISTS idx_snap_parent;
+         DROP INDEX IF EXISTS idx_snap_size_partial;
+         DROP INDEX IF EXISTS idx_full;
+         DROP INDEX IF EXISTS idx_snap_inode;",
+    )?;
+    Ok(())
+}
+
 /// Get the column names of a table as a HashSet for membership checks.
 fn column_names(conn: &Connection, table: &str) -> Result<HashSet<String>> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
