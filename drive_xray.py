@@ -2311,6 +2311,174 @@ def cross_dedupe(
     return groups
 
 
+def single_copy_files(
+    db_labels: list[tuple[Path, str]],
+    min_size: int = 1024 * 1024,
+    target_label: str | None = None,
+    max_files: int = 10000,
+) -> dict:
+    """Find files whose content exists on only ONE drive — i.e. no backup.
+
+    The inverse of `cross_dedupe`: instead of "what is duplicated", answers
+    "what would I lose if a single drive died". A file is *at risk* when no
+    OTHER indexed drive holds identical content (matched by size + partial
+    hash, confirmed by full hash when both sides have it).
+
+    Internal copies within the *same* physical drive are NOT a backup — if
+    the disk dies, every internal copy dies with it — so content confined to
+    one drive is flagged even when duplicated inside that drive. Such internal
+    duplicates are collapsed to a single at-risk entry (bytes counted once)
+    with `internal_copies` recording how many paths hold it.
+
+    Note: files without a partial hash (unhashable / errored at index time)
+    are skipped, mirroring `cross_dedupe`. Drives need not be mounted — this
+    reads the .db snapshots directly.
+
+    Args:
+        db_labels: list of (db_path, drive_label).
+        min_size: ignore files smaller than this (bytes).
+        target_label: if given, report only at-risk files on that drive;
+            otherwise report across every drive.
+        max_files: cap on the returned `at_risk` list (largest first). Totals
+            always reflect the full set; `truncated` flags when the cap hits.
+
+    Returns:
+        {
+          "drives": [labels actually read],
+          "target": target_label or None,
+          "at_risk": [{"drive","path","size","internal_copies"}, ...]  size desc,
+          "at_risk_bytes": int,   # unique content, each counted once
+          "at_risk_count": int,   # number of at-risk content items
+          "truncated": bool,
+          "by_folder": [{"drive","folder","bytes","count"}, ...]  top 40 by bytes,
+          "per_drive": {label: {"bytes": int, "count": int}},
+        }
+    """
+    # (size, partial) → list of {"drive", "path", "fh"}
+    index: dict[tuple[int, bytes], list] = defaultdict(list)
+    drives_read: list[str] = []
+
+    for db_path, label in db_labels:
+        try:
+            conn = open_db(db_path)
+        except Exception:
+            continue
+        sid = latest_snapshot_id(conn)
+        if sid is None:
+            conn.close()
+            continue
+        drives_read.append(label)
+        # dedupe by (inode, device) within a db so APFS firmlinks don't look
+        # like internal copies.
+        _seen_inodes: set[tuple[int, int]] = set()
+        for size, partial, rel, fh, ino, dev in conn.execute(
+            "SELECT size, partial_hash, rel_path, full_hash, inode, device"
+            " FROM entries"
+            " WHERE snapshot_id=? AND is_dir=0 AND size>=? AND partial_hash IS NOT NULL",
+            (sid, min_size),
+        ):
+            if ino is not None and dev is not None:
+                ikey = (int(ino), int(dev))
+                if ikey in _seen_inodes:
+                    continue
+                _seen_inodes.add(ikey)
+            index[(size, partial)].append({"drive": label, "path": rel, "fh": fh})
+        conn.close()
+
+    # Need ≥2 drives with actual data — otherwise "single copy" is trivially
+    # true for everything and the result would be dangerously misleading
+    # (e.g. an empty/stub .db silently dropping out of the comparison).
+    if len(drives_read) < 2:
+        return {
+            "drives": drives_read,
+            "target": target_label,
+            "at_risk": [],
+            "at_risk_bytes": 0,
+            "at_risk_count": 0,
+            "truncated": False,
+            "by_folder": [],
+            "per_drive": {},
+            "insufficient": True,
+        }
+
+    def _emit_at_risk(size: int, members: list) -> list[dict]:
+        """Given a content sub-group confined to ONE drive, collapse to a
+        single at-risk entry keyed on the shortest path."""
+        drive = members[0]["drive"]
+        rep = min(members, key=lambda m: (len(m["path"]), m["path"]))["path"]
+        return [{
+            "drive": drive,
+            "path": rep,
+            "size": size,
+            "internal_copies": len(members),
+        }]
+
+    at_risk: list[dict] = []
+    for (size, _partial), members in index.items():
+        distinct_drives = {m["drive"] for m in members}
+        if len(distinct_drives) >= 2:
+            # present on multiple drives at the (size, partial) level.
+            # Refine with full_hash where available: a full_hash sub-group
+            # confined to one drive is still at risk (the cross-drive match
+            # was only a partial-hash collision, not identical content).
+            if all(m["fh"] is not None for m in members):
+                by_fh: dict[bytes, list] = defaultdict(list)
+                for m in members:
+                    by_fh[m["fh"]].append(m)
+                for sub in by_fh.values():
+                    if len({m["drive"] for m in sub}) < 2:
+                        at_risk.extend(_emit_at_risk(size, sub))
+            # else: unconfirmed cross-drive match — assume backed up (do not
+            # cry wolf). Partial-hash collisions on identical size are rare.
+        else:
+            # content confined to a single drive → at risk.
+            at_risk.extend(_emit_at_risk(size, members))
+
+    # optional per-drive focus
+    if target_label is not None:
+        at_risk = [r for r in at_risk if r["drive"] == target_label]
+
+    at_risk.sort(key=lambda r: -r["size"])
+
+    at_risk_bytes = sum(r["size"] for r in at_risk)
+    at_risk_count = len(at_risk)
+
+    # per-drive totals
+    per_drive: dict[str, dict] = {}
+    for r in at_risk:
+        d = per_drive.setdefault(r["drive"], {"bytes": 0, "count": 0})
+        d["bytes"] += r["size"]
+        d["count"] += 1
+
+    # folder rollup: aggregate by immediate parent (per drive)
+    folder_agg: dict[tuple[str, str], dict] = {}
+    for r in at_risk:
+        slash = r["path"].rfind("/")
+        folder = r["path"][:slash] if slash >= 0 else "."
+        fk = (r["drive"], folder)
+        fa = folder_agg.setdefault(fk, {"bytes": 0, "count": 0})
+        fa["bytes"] += r["size"]
+        fa["count"] += 1
+    by_folder = sorted(
+        ({"drive": d, "folder": f, "bytes": v["bytes"], "count": v["count"]}
+         for (d, f), v in folder_agg.items()),
+        key=lambda x: -x["bytes"],
+    )[:40]
+
+    truncated = at_risk_count > max_files
+    return {
+        "drives": drives_read,
+        "target": target_label,
+        "at_risk": at_risk[:max_files],
+        "at_risk_bytes": at_risk_bytes,
+        "at_risk_count": at_risk_count,
+        "truncated": truncated,
+        "by_folder": by_folder,
+        "per_drive": per_drive,
+        "insufficient": False,
+    }
+
+
 def read_drive_index_opts(db_labels: list[tuple[Path, str]]) -> dict[str, dict]:
     """Return {label: {"one_fs": bool, "skip_cloud": bool}} from each db's
     drive table. Drives that can't be read are omitted."""
@@ -2462,6 +2630,23 @@ def main():
                      help="use all drives from the central registry")
     pxd.add_argument("--min-size", type=int, default=1024 * 1024,
                      metavar="BYTES", help="ignore files smaller than this (default 1 MB)")
+
+    psc = sub.add_parser(
+        "single-copy",
+        help="find files that exist on only ONE drive (no backup; works offline)",
+    )
+    psc.add_argument(
+        "dbs", nargs="*", type=Path,
+        help="db files to compare (default: all registered drives)",
+    )
+    psc.add_argument("--all", dest="use_all", action="store_true",
+                     help="use all drives from the central registry")
+    psc.add_argument("--min-size", type=int, default=1024 * 1024,
+                     metavar="BYTES", help="ignore files smaller than this (default 1 MB)")
+    psc.add_argument("--drive", dest="target", metavar="LABEL", default=None,
+                     help="only report at-risk files on this drive")
+    psc.add_argument("--json", action="store_true",
+                     help="emit the full result as JSON")
 
     args = p.parse_args()
 
@@ -2621,6 +2806,50 @@ def main():
                 if i >= 200:
                     print(f"  … {len(groups)-200} more groups not shown")
                     break
+
+    elif args.cmd == "single-copy":
+        if args.use_all or not args.dbs:
+            reg = registry_list()
+            db_labels = [(e["db"], e["label"]) for e in reg if e["exists"]]
+        else:
+            db_labels = []
+            for db in args.dbs:
+                try:
+                    conn = open_db(db)
+                    row = conn.execute(
+                        "SELECT label FROM drive LIMIT 1"
+                    ).fetchone()
+                    conn.close()
+                    db_labels.append((db, row[0] if row else db.stem))
+                except Exception as exc:
+                    print(f"  skip {db}: {exc}", file=sys.stderr)
+        if len(db_labels) < 2:
+            sys.exit("single-copy needs at least 2 drives to compare. "
+                     "Use --all or pass db files.")
+        result = single_copy_files(db_labels, min_size=args.min_size,
+                                   target_label=args.target)
+        if args.json:
+            print(json.dumps(result))
+        elif result.get("insufficient"):
+            got = ", ".join(result["drives"]) or "none"
+            sys.exit(f"single-copy needs ≥2 drives WITH data; only {got} had a "
+                     f"snapshot. Re-index the empty/stub drives first.")
+        else:
+            scope = f" on {result['target']}" if result["target"] else ""
+            print(f"single-copy across {len(result['drives'])} drives{scope}: "
+                  f"{result['at_risk_count']} at-risk items · "
+                  f"{human(result['at_risk_bytes'])} with no backup\n",
+                  file=sys.stderr)
+            for lbl, d in sorted(result["per_drive"].items(),
+                                 key=lambda kv: -kv[1]["bytes"]):
+                print(f"  {lbl:<20}  {human(d['bytes']):>10}  ({d['count']} items)")
+            if result["by_folder"]:
+                print("\n  top folders with no backup:")
+                for f in result["by_folder"][:20]:
+                    print(f"    {human(f['bytes']):>10}  [{f['drive']}]  {f['folder']}/")
+            if result["truncated"]:
+                print(f"\n  (file list capped; {result['at_risk_count']:,} items total)",
+                      file=sys.stderr)
 
 
 if __name__ == "__main__":

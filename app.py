@@ -28,7 +28,7 @@ from drive_xray import (
     CLEANUP_STRATEGIES, CLEANUP_ACTIONS,
     latest_snapshot_id, list_snapshots, diff_snapshots,
     registry_list, registry_remove, registry_register,
-    cross_dedupe, read_drive_index_opts,
+    cross_dedupe, single_copy_files, read_drive_index_opts,
     verify_file, execute_file_action, QUARANTINE_DIR, AUDIT_LOG,
     read_config, write_config, get_db_dir, import_folder,
     tags_get, tags_set, tags_search, notes_get, notes_set,
@@ -185,6 +185,29 @@ TRANSLATIONS = {
         "cross_matrix_caption": "GB partilhados entre cada par de drives. Quanto mais escuro, mais duplicados.",
         "cross_download_csv": "⬇️ Exportar CSV (todos os grupos)",
         "cross_details": "📋 Detalhes (top 500 grupos)",
+        # single-copy (no backup) — inverse of cross-dedupe
+        "sc_title": "🛟 Ficheiros sem cópia de segurança",
+        "sc_caption": "O inverso: conteúdo que existe em apenas UMA drive. Se essa drive falhar, perde-o para sempre. Cópias internas na mesma drive não contam como backup.",
+        "sc_need_drives": "Precisa de pelo menos 2 drives indexadas com dados para comparar.",
+        "sc_insufficient": "⚠️ Apenas uma drive tinha dados ({drives}). Sem uma segunda drive para comparar, o resultado seria enganador (tudo pareceria sem cópia). Reindexe as drives vazias/stub.",
+        "sc_scope": "Drive a analisar",
+        "sc_scope_all": "Todas",
+        "sc_btn": "Procurar ficheiros sem cópia",
+        "sc_no_results": "✅ Nada em risco — todo o conteúdo (acima do tamanho mínimo) existe em pelo menos duas drives.",
+        "sc_metric_items": "Itens sem cópia",
+        "sc_metric_bytes": "Total em risco",
+        "sc_metric_drives": "Drives comparadas",
+        "sc_per_drive": "Por drive",
+        "sc_by_folder": "📁 Pastas sem cópia (top 40)",
+        "sc_col_drive": "drive",
+        "sc_col_folder": "pasta",
+        "sc_col_path": "caminho",
+        "sc_col_bytes": "tamanho",
+        "sc_col_count": "nº itens",
+        "sc_col_copies": "cópias internas",
+        "sc_files_title": "📋 Ficheiros sem cópia (top {n} por tamanho)",
+        "sc_download_csv": "⬇️ Exportar CSV (todos os ficheiros em risco)",
+        "sc_truncated": "Tabela mostra os maiores {shown} de {total} itens; o CSV inclui todos.",
         "compare_with": "Comparar com",
         "minimum_mb": "Mínimo (MB)",
         "compare_button": "Comparar",
@@ -399,6 +422,29 @@ TRANSLATIONS = {
         "cross_matrix_caption": "Shared GB between each pair of drives. Darker = more duplicates.",
         "cross_download_csv": "⬇️ Export CSV (all groups)",
         "cross_details": "📋 Details (top 500 groups)",
+        # single-copy (no backup) — inverse of cross-dedupe
+        "sc_title": "🛟 Files with no backup",
+        "sc_caption": "The inverse: content that lives on only ONE drive. If that drive dies, it's gone for good. Internal copies on the same drive do not count as a backup.",
+        "sc_need_drives": "Need at least 2 indexed drives with data to compare.",
+        "sc_insufficient": "⚠️ Only one drive had data ({drives}). Without a second drive to compare against, the result would be misleading (everything would look un-backed-up). Re-index the empty/stub drives.",
+        "sc_scope": "Drive to analyse",
+        "sc_scope_all": "All",
+        "sc_btn": "Find files with no backup",
+        "sc_no_results": "✅ Nothing at risk — all content (above the minimum size) exists on at least two drives.",
+        "sc_metric_items": "Un-backed items",
+        "sc_metric_bytes": "Total at risk",
+        "sc_metric_drives": "Drives compared",
+        "sc_per_drive": "Per drive",
+        "sc_by_folder": "📁 Folders with no backup (top 40)",
+        "sc_col_drive": "drive",
+        "sc_col_folder": "folder",
+        "sc_col_path": "path",
+        "sc_col_bytes": "size",
+        "sc_col_count": "items",
+        "sc_col_copies": "internal copies",
+        "sc_files_title": "📋 Files with no backup (top {n} by size)",
+        "sc_download_csv": "⬇️ Export CSV (all at-risk files)",
+        "sc_truncated": "Table shows the largest {shown} of {total} items; the CSV has them all.",
         "compare_with": "Compare with",
         "minimum_mb": "Minimum (MB)",
         "compare_button": "Compare",
@@ -2114,6 +2160,98 @@ with tab_compare:
                 )
                 if len(_xgroups) > 500:
                     st.caption(t("groups_not_shown", n=len(_xgroups) - 500))
+
+    st.divider()
+
+    # ── single-copy: files with no backup (inverse of cross-dedupe) ───────────
+    st.subheader(t("sc_title"))
+    st.caption(t("sc_caption"))
+
+    if len(dbs) < 2:
+        st.info(t("sc_need_drives"))
+    else:
+        _sc_labels_map = {
+            _db: _reg_entries.get(_db.resolve(), {}).get("label", _db.stem)
+            for _db in dbs
+        }
+        _sc_c1, _sc_c2 = st.columns([2, 3])
+        _sc_min_mb = _sc_c1.slider(t("minimum_mb"), 0, 500, 50, key="sc_min")
+        _sc_scope_opts = [t("sc_scope_all")] + sorted(_sc_labels_map.values())
+        _sc_scope = _sc_c2.selectbox(
+            t("sc_scope"), _sc_scope_opts, key="sc_scope_sel"
+        )
+
+        if st.button(t("sc_btn"), type="primary", key="sc_run_btn"):
+            _sc_db_labels = [(_db, lbl) for _db, lbl in _sc_labels_map.items()]
+            _sc_target = None if _sc_scope == t("sc_scope_all") else _sc_scope
+            with st.spinner(t("calculating")):
+                st.session_state["sc_result"] = single_copy_files(
+                    _sc_db_labels,
+                    min_size=_sc_min_mb * 1024 * 1024,
+                    target_label=_sc_target,
+                    max_files=200000,
+                )
+
+        if "sc_result" in st.session_state:
+            _sc = st.session_state["sc_result"]
+            if _sc.get("insufficient"):
+                st.warning(t("sc_insufficient",
+                             drives=", ".join(_sc["drives"]) or "—"))
+            elif _sc["at_risk_count"] == 0:
+                st.success(t("sc_no_results"))
+            else:
+                _scm1, _scm2, _scm3 = st.columns(3)
+                _scm1.metric(t("sc_metric_items"), f"{_sc['at_risk_count']:,}")
+                _scm2.metric(t("sc_metric_bytes"), human(_sc["at_risk_bytes"]))
+                _scm3.metric(t("sc_metric_drives"), f"{len(_sc['drives'])}")
+
+                if _sc["per_drive"]:
+                    st.caption(t("sc_per_drive"))
+                    st.dataframe(
+                        [{t("sc_col_drive"): _d,
+                          t("sc_col_bytes"): human(_v["bytes"]),
+                          t("sc_col_count"): _v["count"]}
+                         for _d, _v in sorted(_sc["per_drive"].items(),
+                                              key=lambda kv: -kv[1]["bytes"])],
+                        use_container_width=True, hide_index=True,
+                    )
+
+                if _sc["by_folder"]:
+                    st.subheader(t("sc_by_folder"))
+                    st.dataframe(
+                        [{t("sc_col_drive"): _f["drive"],
+                          t("sc_col_folder"): _f["folder"] + "/",
+                          t("sc_col_bytes"): human(_f["bytes"]),
+                          t("sc_col_count"): _f["count"]}
+                         for _f in _sc["by_folder"]],
+                        use_container_width=True, hide_index=True,
+                    )
+
+                # per-file list + full CSV export
+                st.subheader(t("sc_files_title", n=min(len(_sc["at_risk"]), 2000)))
+                import csv as _sc_csv, io as _sc_io
+                _sc_buf = _sc_io.StringIO()
+                _sc_w = _sc_csv.writer(_sc_buf)
+                _sc_w.writerow(["drive", "path", "size_bytes",
+                                "size_human", "internal_copies"])
+                for _r in _sc["at_risk"]:
+                    _sc_w.writerow([_r["drive"], _r["path"], _r["size"],
+                                    human(_r["size"]), _r["internal_copies"]])
+                st.download_button(
+                    t("sc_download_csv"), data=_sc_buf.getvalue().encode(),
+                    file_name="single-copy.csv", mime="text/csv", key="sc_csv",
+                )
+                st.dataframe(
+                    [{t("sc_col_drive"): _r["drive"],
+                      t("sc_col_path"): _r["path"],
+                      t("sc_col_bytes"): human(_r["size"]),
+                      t("sc_col_copies"): _r["internal_copies"]}
+                     for _r in _sc["at_risk"][:2000]],
+                    use_container_width=True, hide_index=True,
+                )
+                if len(_sc["at_risk"]) > 2000:
+                    st.caption(t("sc_truncated", shown=2000,
+                                 total=_sc["at_risk_count"]))
 
     st.divider()
 
