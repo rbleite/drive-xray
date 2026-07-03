@@ -271,6 +271,8 @@ TRANSLATIONS = {
         "at_rules_created": "Ficheiro criado — edita-o para personalizar as regras.",
         # cold data (archive candidates) — Map tab
         "cold_title": "❄️ Dados frios (candidatos a arquivo)",
+        "cold_badge": "dados frios",
+        "cold_map_hint": "❄️ As pastas frias estão realçadas a azul-gélido no TreeMap acima.",
         "cold_caption": "Pastas cujo ficheiro mais recente é anterior ao limite — candidatas a arquivo/cold storage. Mostra o topo de cada subárvore fria.",
         "cold_years": "Mais antigo que (anos)",
         "cold_btn": "Procurar dados frios",
@@ -533,6 +535,8 @@ TRANSLATIONS = {
         "at_rules_created": "File created — edit it to customise the rules.",
         # cold data (archive candidates) — Map tab
         "cold_title": "❄️ Cold data (archive candidates)",
+        "cold_badge": "cold data",
+        "cold_map_hint": "❄️ Cold folders are highlighted in icy blue on the TreeMap above.",
         "cold_caption": "Folders whose newest file predates the cutoff — candidates for archival/cold storage. Shows the top of each cold subtree.",
         "cold_years": "Older than (years)",
         "cold_btn": "Find cold data",
@@ -1802,18 +1806,41 @@ with tab_map:
         st.session_state[_at_mtime_key] = _at_key
     _auto_tags: dict = st.session_state.get(_at_data_key, {})
 
-    # colour palette — auto-assigned per unique tag (alphabetical order)
+    # colour palette — one colour per unique tag NAME, shared by manual AND
+    # auto tags, so an auto-classified "NGS" gets the same colour as a manual
+    # "NGS" (rather than every auto-tagged folder sharing one grey).
     _TAG_PALETTE = [
         "#e74c3c", "#3498db", "#2ecc71", "#f39c12",
         "#9b59b6", "#1abc9c", "#e67e22", "#e91e63",
         "#00bcd4", "#8bc34a", "#ff7043", "#7986cb",
     ]
-    _all_unique_tags = sorted({tg for tgs in _folder_tags.values() for tg in tgs})
+    _all_unique_tags = sorted(
+        {tg for tgs in _folder_tags.values() for tg in tgs}
+        | {tg for tgs in _auto_tags.values() for tg in tgs}
+    )
     _tag_color = {tg: _TAG_PALETTE[i % len(_TAG_PALETTE)]
                   for i, tg in enumerate(_all_unique_tags)}
     _DEFAULT_FOLDER_COLOR = "#1f77b4"
     _DEFAULT_FILE_COLOR   = "#888888"
-    _AUTO_TAG_COLOR       = "#78909c"  # blue-grey for auto-detected folders
+    _COLD_COLOR           = "#8ecae6"  # icy blue — cold / archive candidates
+
+    # cold folders — populated once the cold-data panel has been computed for
+    # THIS drive (defaults to >2 years untouched). A folder is cold if it IS,
+    # or sits under, a maximal cold candidate.
+    _cold_candidates: set = set()
+    if (st.session_state.get("cold_result_db") == str(selected_db)
+            and st.session_state.get("cold_result")):
+        _cold_candidates = {c["folder"]
+                            for c in st.session_state["cold_result"]["candidates"]}
+
+    def _is_cold(rp: str) -> bool:
+        if not _cold_candidates:
+            return False
+        if rp in _cold_candidates:
+            return True
+        parts = rp.split("/")
+        return any("/".join(parts[:k]) in _cold_candidates
+                   for k in range(1, len(parts)))
 
     if not rows:
         st.info(t("map_empty"))
@@ -1835,10 +1862,13 @@ with tab_map:
             if kind != "folder":
                 return _DEFAULT_FILE_COLOR
             tgs = _folder_tags.get(rp, [])
-            if tgs:
+            if tgs:                                      # manual tag wins
                 return _tag_color.get(tgs[0], _DEFAULT_FOLDER_COLOR)
-            if _auto_tags.get(rp):
-                return _AUTO_TAG_COLOR
+            if _is_cold(rp):                             # then cold (archive)
+                return _COLD_COLOR
+            atgs = _auto_tags.get(rp, [])
+            if atgs:                                     # then auto-tag colour
+                return _tag_color.get(atgs[0], _DEFAULT_FOLDER_COLOR)
             return _DEFAULT_FOLDER_COLOR
 
         def _hover_extra(rp):
@@ -1850,6 +1880,8 @@ with tab_map:
                 parts.append("🏷️ " + " · ".join(tgs))
             if atgs:
                 parts.append("🤖 " + " · ".join(atgs))
+            if _is_cold(rp):
+                parts.append("❄️ " + t("cold_badge"))
             if nt:
                 parts.append("📝 " + (nt[:80] + "…" if len(nt) > 80 else nt))
             return ("<br>" + "<br>".join(parts)) if parts else ""
@@ -1875,22 +1907,19 @@ with tab_map:
         )
         st.caption(t("map_legend", n=len(rows)))
 
-        # colour legend when tags or auto-tags are present
-        if _tag_color or _auto_tags:
+        # colour legend — per-tag colours (manual + auto share them) plus a
+        # cold chip once cold data has been computed.
+        _leg_items = list(_tag_color.items())
+        if _cold_candidates:
+            _leg_items.append(("❄️ " + t("cold_badge"), _COLD_COLOR))
+        if _leg_items:
             with st.expander(t("tags_legend"), expanded=False):
-                _leg_items = list(_tag_color.items())
-                if _auto_tags:
-                    _leg_items.append(("🤖 auto", _AUTO_TAG_COLOR))
                 _leg_cols = st.columns(min(len(_leg_items), 4))
                 for i, (tg, col) in enumerate(_leg_items):
-                    label = tg if not tg.startswith("🤖") else (
-                        f'{tg} <span style="font-size:0.75em;opacity:0.8">'
-                        f'— {t("auto_tags_legend_note")}</span>'
-                    )
                     _leg_cols[i % len(_leg_cols)].markdown(
                         f'<span style="background:{col};color:#fff;'
                         f'padding:2px 8px;border-radius:4px;font-size:0.85em">'
-                        f'{label}</span>', unsafe_allow_html=True)
+                        f'{tg}</span>', unsafe_allow_html=True)
 
         # pre-select clicked folder in the tag editor
         if _map_event and _map_event.selection and _map_event.selection.get("points"):
@@ -1925,8 +1954,9 @@ with tab_map:
         _sel_auto = _auto_tags.get(_sel_folder, []) if _sel_folder else []
         if _sel_auto:
             _chips_html = " ".join(
-                f'<span style="background:#78909c;color:#fff;padding:2px 8px;'
-                f'border-radius:12px;font-size:0.8em;margin-right:2px">{tg}</span>'
+                f'<span style="background:{_tag_color.get(tg, "#78909c")};'
+                f'color:#fff;padding:2px 8px;border-radius:12px;'
+                f'font-size:0.8em;margin-right:2px">{tg}</span>'
                 for tg in _sel_auto
             )
             st.markdown(
@@ -2050,6 +2080,7 @@ with tab_map:
                 _cm1.metric(t("cold_metric_folders"), f"{_cd['total_folders']:,}")
                 _cm2.metric(t("cold_metric_bytes"), human(_cd["total_bytes"]))
                 _cm3.metric(t("cold_metric_cutoff"), _cd["cutoff_iso"][:10])
+                st.caption(t("cold_map_hint"))
 
                 import csv as _cd_csv, io as _cd_io
                 _cd_buf = _cd_io.StringIO()
