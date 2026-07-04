@@ -854,8 +854,14 @@ def _registry_save(data: dict) -> None:
     )
 
 
+def _registry_disabled() -> bool:
+    return os.environ.get("DRIVE_XRAY_NO_REGISTRY", "").lower() in {"1", "true", "yes"}
+
+
 def registry_register(db_path: Path, label: str, root: Path) -> None:
     """Record a drive db in the central registry."""
+    if _registry_disabled():
+        return
     data = _registry_load()
     data["drives"][str(db_path.resolve())] = {
         "label": label,
@@ -2861,6 +2867,134 @@ def read_drive_index_opts(db_labels: list[tuple[Path, str]]) -> dict[str, dict]:
     return result
 
 
+
+
+def doctor_db(db_path: Path) -> dict:
+    """Validate a drive-xray DB without mutating it.
+
+    This deliberately opens the DB read-only and avoids `open_db()`, because
+    migrations and CREATE INDEX IF NOT EXISTS would hide exactly the problems
+    doctor is meant to report.
+    """
+    checks: list[dict] = []
+
+    def add(name: str, ok: bool, detail: str) -> None:
+        checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    if not db_path.exists():
+        add("file", False, "database file is missing")
+        return {"ok": False, "checks": checks}
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except Exception as exc:
+        add("open", False, f"cannot open database: {exc}")
+        return {"ok": False, "checks": checks}
+
+    try:
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        has_paths = "paths" in tables
+        has_entries = "entries" in tables
+        has_snapshots = "snapshots" in tables
+        if has_paths and has_entries:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(entries)")}
+            add("schema", "path_id" in cols, "v5/v6 path interning" if "path_id" in cols else "entries.path_id missing")
+        else:
+            add("schema", False, "missing paths or entries table")
+
+        try:
+            row = conn.execute("SELECT label, root_path, hash_version FROM drive LIMIT 1").fetchone()
+        except Exception:
+            row = None
+        if row:
+            label, root, hv = row
+            add("drive", True, f"label={label!r} root={root!r}")
+            add("hash_version", hv == HASH_VERSION,
+                f"v{hv} in DB; expected v{HASH_VERSION}")
+        else:
+            add("drive", False, "no row in drive table")
+
+        snap_count = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0] if has_snapshots else 0
+        add("snapshots", snap_count > 0, f"{snap_count} snapshot(s)")
+
+        expected = {
+            "idx_snap_parent", "idx_snap_size_partial", "idx_full",
+            "idx_snap_inode", "idx_snap_path_id",
+        }
+        found = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        missing = sorted(expected - found)
+        add("indexes", not missing,
+            f"{len(found)} indexes present" if not missing else "missing: " + ", ".join(missing))
+
+        if has_paths and has_entries:
+            orphans = conn.execute(
+                "SELECT COUNT(*) FROM entries WHERE path_id IS NOT NULL "
+                "AND path_id NOT IN (SELECT id FROM paths)"
+            ).fetchone()[0]
+            add("orphan_entries", orphans == 0,
+                "none" if orphans == 0 else f"{orphans} entries with missing path_id")
+
+        if snap_count > 0 and has_entries:
+            for sid, meta_files, meta_dirs in conn.execute(
+                    "SELECT id, COALESCE(total_files,-1), COALESCE(total_dirs,-1) "
+                    "FROM snapshots ORDER BY id"):
+                actual_files = conn.execute(
+                    "SELECT COUNT(*) FROM entries WHERE snapshot_id=? AND is_dir=0 "
+                    "AND COALESCE(is_symlink,0)=0", (sid,)
+                ).fetchone()[0]
+                actual_dirs = conn.execute(
+                    "SELECT COUNT(*) FROM entries WHERE snapshot_id=? AND is_dir=1", (sid,)
+                ).fetchone()[0]
+                symlinks = conn.execute(
+                    "SELECT COUNT(*) FROM entries WHERE snapshot_id=? AND is_symlink=1", (sid,)
+                ).fetchone()[0]
+                entries_total = actual_files + actual_dirs + symlinks
+                detail = (f"snapshot #{sid}: {actual_files} files / {actual_dirs} dirs / "
+                          f"{symlinks} symlinks (metadata: {meta_files}/{meta_dirs})")
+                if entries_total == 0 and (meta_files > 0 or meta_dirs > 0):
+                    add("entry_counts", False, "empty latest entries but snapshot metadata is non-zero — re-index required")
+                    continue
+                dirs_ok = meta_dirs < 0 or abs(actual_dirs - meta_dirs) <= 1
+                files_ok = meta_files < 0 or meta_files == 0 or abs(actual_files - meta_files) / max(meta_files, 1) <= 0.05
+                add("entry_counts", files_ok and dirs_ok, detail if files_ok and dirs_ok else "mismatch — " + detail)
+
+                hashed = conn.execute(
+                    "SELECT COUNT(*) FROM entries WHERE snapshot_id=? AND is_dir=0 "
+                    "AND partial_hash IS NOT NULL", (sid,)
+                ).fetchone()[0]
+                pct = 100 if actual_files == 0 else int(hashed * 100 / actual_files)
+                add("hash_coverage", pct >= 95,
+                    f"snapshot #{sid}: {hashed}/{actual_files} files have partial_hash ({pct}%)")
+
+        wal = Path(str(db_path) + "-wal")
+        if wal.exists():
+            sz = wal.stat().st_size
+            add("wal", sz < 10_000_000,
+                f"WAL present ({sz / 1_000_000:.1f} MB)" if sz >= 10_000_000 else f"WAL present but small ({sz} bytes)")
+        else:
+            add("wal", True, "no WAL file (clean)")
+    finally:
+        conn.close()
+
+    return {"ok": all(c["ok"] for c in checks), "checks": checks}
+
+
+def print_doctor(result: dict, db_path: Path) -> None:
+    checks = result.get("checks", [])
+    width = max([len(c["name"]) for c in checks] or [10])
+    print(f"\ndx doctor  {db_path}")
+    print("─" * 60)
+    for c in checks:
+        mark = "✓" if c["ok"] else "✗"
+        print(f"  {mark}  {c['name']:<{width}}  {c['detail']}")
+    print("─" * 60)
+    if result.get("ok"):
+        print("  all checks passed\n")
+    else:
+        n = sum(1 for c in checks if not c["ok"])
+        print(f"  {n} check(s) failed\n")
+
 # ---------- cli ----------
 
 def main():
@@ -3042,6 +3176,13 @@ def main():
                     help="compare whole-file hashes (slower, thorough) instead"
                          " of the fast partial hash")
     pv.add_argument("--json", action="store_true", help="emit result as JSON")
+
+    pdoc = sub.add_parser(
+        "doctor",
+        help="validate a .db index file and report structural problems",
+    )
+    pdoc.add_argument("db", type=Path)
+    pdoc.add_argument("--json", action="store_true", help="emit result as JSON")
 
     args = p.parse_args()
 
@@ -3304,6 +3445,15 @@ def main():
                 if len(r["corrupted"]) > 100:
                     print(f"     … +{len(r['corrupted'])-100} more")
                 sys.exit(1)
+
+    elif args.cmd == "doctor":
+        result = doctor_db(args.db)
+        if args.json:
+            print(json.dumps(result))
+        else:
+            print_doctor(result, args.db)
+        if not result.get("ok"):
+            sys.exit(1)
 
 
 if __name__ == "__main__":

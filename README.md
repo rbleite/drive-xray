@@ -119,6 +119,13 @@ start.bat
 > .venv\Scripts\python drive_xray.py index D:\ --label "External_D"
 > ```
 
+> **Faster engine (optional):** the pure-Python engine indexes everything on
+> Windows out of the box. For very large drives, download
+> `dx-<version>-windows-x86_64.zip` from the
+> [Releases](https://github.com/rbleite/drive-xray/releases) page, unzip
+> `dx.exe` into the project folder, and the UI switches to `engine: 🦀 Rust`
+> automatically — the `.db` files are byte-identical either way.
+
 ### Multi-machine sync (OneDrive / Google Drive / Dropbox)
 
 Store all `.db` index files in a shared cloud folder so every machine

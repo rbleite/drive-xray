@@ -159,7 +159,6 @@ mod tests {
     #[test]
     fn partial_file_matches_bytes() {
         // The on-disk variant must match the in-memory one for the same content.
-        use std::io::Write;
         let tmp = std::env::temp_dir().join(format!("dx-hash-{}", std::process::id()));
         let content = b"some test content here, more than nothing.";
         std::fs::write(&tmp, content).unwrap();
@@ -173,7 +172,7 @@ mod tests {
     fn partial_large_file() {
         // >192 KB exercises the head/middle/tail seek path on a real file.
         let tmp = std::env::temp_dir().join(format!("dx-hash-large-{}", std::process::id()));
-        let content: Vec<u8> = (0..512u32).flat_map(|i| (i as u8..(i as u8).wrapping_add(64))).collect();
+        let content: Vec<u8> = (0..512u32).flat_map(|i| i as u8..(i as u8).wrapping_add(64)).collect();
         let _ = content.len(); // pacify clippy in case it's unused
         // build deterministic ~200 KB content
         let mut data = Vec::with_capacity(200_000);

@@ -1170,14 +1170,14 @@ with st.sidebar:
     cur_lang = st.session_state.get("lang", "pt")
     lc1, lc2 = st.columns(2)
     if lc1.button(
-        "🇵🇹 PT", use_container_width=True,
+        "🇵🇹 PT", width="stretch",
         type="primary" if cur_lang == "pt" else "secondary",
         key="lang_pt",
     ):
         st.session_state.lang = "pt"
         st.rerun()
     if lc2.button(
-        "🇬🇧 EN", use_container_width=True,
+        "🇬🇧 EN", width="stretch",
         type="primary" if cur_lang == "en" else "secondary",
         key="lang_en",
     ):
@@ -1190,7 +1190,7 @@ with st.sidebar:
     # ── self-update from GitHub ────────────────────────────────────────────
     with st.expander(t("upd_title"), expanded=False):
         import update as _upd
-        if st.button(t("upd_check"), key="upd_check", use_container_width=True):
+        if st.button(t("upd_check"), key="upd_check", width="stretch"):
             st.session_state["upd_status"] = _upd.check_updates()
         _st = st.session_state.get("upd_status")
         if _st:
@@ -1247,7 +1247,7 @@ with st.sidebar:
                 (("⏳ " if _db_busy else ("▶ " if is_current else "   "))
                  + _display_label),
                 key=f"sel_{db}",
-                use_container_width=True,
+                width="stretch",
                 type="primary" if is_current else "secondary",
             ):
                 st.session_state.db_choice_path = str(db)
@@ -1360,7 +1360,7 @@ with st.sidebar:
             key="cfg_db_dir_input",
         )
         _scol1, _scol2 = st.columns(2)
-        if _scol1.button(t("settings_save"), use_container_width=True,
+        if _scol1.button(t("settings_save"), width="stretch",
                          key="cfg_save_btn"):
             _p = Path(_new_dir).expanduser()
             try:
@@ -1375,7 +1375,7 @@ with st.sidebar:
             except Exception:
                 st.error(t("settings_invalid"))
 
-        if _scol2.button(t("settings_import_btn"), use_container_width=True,
+        if _scol2.button(t("settings_import_btn"), width="stretch",
                          key="cfg_import_btn",
                          help=t("settings_import_help")):
             _imp = import_folder(Path(_new_dir))
@@ -1431,17 +1431,17 @@ if "del_plan" in st.session_state:
 
         if not _exec_files:
             st.warning(t("del_nothing_to_do"))
-            if st.button(t("cancel"), use_container_width=True, key="dd_cancel"):
+            if st.button(t("cancel"), width="stretch", key="dd_cancel"):
                 st.session_state.pop("del_plan", None)
                 st.rerun()
         else:
             c1, c2 = st.columns(2)
-            if c1.button(t("cancel"), use_container_width=True, key="dd_cancel"):
+            if c1.button(t("cancel"), width="stretch", key="dd_cancel"):
                 st.session_state.pop("del_plan", None)
                 st.rerun()
             if c2.button(
                 t("del_execute_btn", n=len(_exec_files), size=human(_bytes_free)),
-                type="primary", use_container_width=True, key="dd_exec",
+                type="primary", width="stretch", key="dd_exec",
             ):
                 _results = [
                     execute_file_action(
@@ -1484,7 +1484,7 @@ if "pending_info" in st.session_state:
         _new = st.text_input(t("rename_label"), value=_current, key="rename_inp")
         rc1, rc2 = st.columns(2)
         if rc1.button(t("rename_save"), type="primary",
-                      use_container_width=True, key="rename_ok",
+                      width="stretch", key="rename_ok",
                       disabled=not _new.strip() or _new.strip() == _current):
             _nl = _new.strip()
             _conn = open_db(_db)
@@ -1494,7 +1494,7 @@ if "pending_info" in st.session_state:
             registry_register(_db, _nl, Path(_reg.get("root", "/")))
             st.session_state.pop("pending_info", None)
             st.rerun()
-        if rc2.button(t("cancel"), use_container_width=True, key="rename_cancel"):
+        if rc2.button(t("cancel"), width="stretch", key="rename_cancel"):
             st.session_state.pop("pending_info", None)
             st.rerun()
 
@@ -1513,7 +1513,7 @@ if "pending_delete" in st.session_state:
         c1, c2 = st.columns(2)
         if c1.button(
             t("yes_delete"), type="primary",
-            use_container_width=True, key="pd_yes",
+            width="stretch", key="pd_yes",
         ):
             delete_db_files(target)
             st.session_state.pop("pending_delete", None)
@@ -1522,7 +1522,7 @@ if "pending_delete" in st.session_state:
             st.session_state.pop("dupes_ready", None)
             st.rerun()
         if c2.button(
-            t("cancel"), use_container_width=True, key="pd_no",
+            t("cancel"), width="stretch", key="pd_no",
         ):
             st.session_state.pop("pending_delete", None)
             st.rerun()
@@ -1573,6 +1573,27 @@ with tab_summary:
         start_compact(selected_db)
         st.rerun()
 
+    # ── structural DB health check ────────────────────────────────────────────
+    with st.expander("🩺 Doctor", expanded=False):
+        st.caption("Valida a estrutura do índice sem modificar a base de dados.")
+        if st.button("🩺 Correr doctor", key="doctor_btn"):
+            from drive_xray import doctor_db
+            st.session_state["doctor_result"] = doctor_db(selected_db)
+            st.session_state["doctor_result_db"] = str(selected_db)
+        _doc = st.session_state.get("doctor_result")
+        if _doc and st.session_state.get("doctor_result_db") == str(selected_db):
+            if _doc.get("ok"):
+                st.success("Todos os checks passaram.")
+            else:
+                st.error("Foram encontrados problemas neste índice.")
+            st.dataframe(
+                [{"": "✓" if c["ok"] else "✗",
+                  "check": c["name"],
+                  "detalhe": c["detail"]}
+                 for c in _doc.get("checks", [])],
+                width="stretch", hide_index=True,
+            )
+
     # ── integrity / bit-rot verification ──────────────────────────────────────
     with st.expander(t("verify_title"), expanded=False):
         st.caption(t("verify_caption"))
@@ -1604,7 +1625,7 @@ with tab_summary:
                         [{"": "⚠️", t("tags_col_path"): c["rel_path"],
                           t("db_size"): human(c["size"] or 0)}
                          for c in _vr["corrupted"][:500]],
-                        use_container_width=True, hide_index=True)
+                        width="stretch", hide_index=True)
                 else:
                     st.success(t("verify_clean"))
 
@@ -1626,7 +1647,7 @@ with tab_summary:
         st.dataframe(
             [{t("ext_col"): e, t("files_col"): c, t("size_col"): human(s)}
              for e, c, s in ext_rows],
-            use_container_width=True, hide_index=True,
+            width="stretch", hide_index=True,
         )
 
 # --- Duplicates ---
@@ -1725,14 +1746,14 @@ with tab_dupes:
                 data=build_csv(export_rows),
                 file_name=f"{selected_db.stem}-duplicates.csv",
                 mime="text/csv",
-                use_container_width=True,
+                width="stretch",
             )
             ec2.download_button(
                 t("download_xlsx"),
                 data=build_xlsx(export_rows),
                 file_name=f"{selected_db.stem}-duplicates.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
+                width="stretch",
             )
 
         st.subheader(t("duplicate_files"))
@@ -1797,7 +1818,7 @@ with tab_dupes:
                 },
                 disabled=["#", t("cross_col_size"), t("cross_col_path")],
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
                 key="del_editor",
             )
 
@@ -2029,7 +2050,7 @@ with tab_map:
         fig.update_layout(margin=dict(t=10, l=0, r=0, b=0), height=700,
                           clickmode="event+select")
         _map_event = st.plotly_chart(
-            fig, use_container_width=True,
+            fig, width="stretch",
             on_select="rerun", key="treemap_plot",
         )
         st.caption(t("map_legend", n=len(rows)))
@@ -2152,7 +2173,7 @@ with tab_map:
                       t("tags_col_tags"): " · ".join(tgs),
                       t("tags_col_note"): notes_get(selected_db, p)}
                      for p, tgs in _filtered.items()],
-                    use_container_width=True, hide_index=True,
+                    width="stretch", hide_index=True,
                 )
             else:
                 st.info(t("tags_filter_empty"))
@@ -2177,7 +2198,7 @@ with tab_map:
         st.dataframe(
             [{t("tags_col_tags"): _tag, "ext": ", ".join(sorted(_exts))}
              for _exts, _tag in _at_rules],
-            use_container_width=True, hide_index=True,
+            width="stretch", hide_index=True,
         )
 
     # ── folder exclusions ─────────────────────────────────────────────────────
@@ -2258,7 +2279,7 @@ with tab_map:
                       t("cold_col_newest"): _c["newest_iso"][:10],
                       t("cold_col_files"): _c["file_count"]}
                      for _c in _cd["candidates"][:1000]],
-                    use_container_width=True, hide_index=True,
+                    width="stretch", hide_index=True,
                 )
                 if len(_cd["candidates"]) > 1000:
                     st.caption(t("cold_truncated", shown=1000,
@@ -2293,7 +2314,7 @@ with tab_history:
                 }
                 for s in snaps
             ],
-            use_container_width=True, hide_index=True,
+            width="stretch", hide_index=True,
         )
 
         if len(snaps) >= 2:
@@ -2338,14 +2359,14 @@ with tab_history:
                     [{"folder": k + "/", "Δ": human(v)}
                      for k, v in d["top_growth"] if v > 0] or
                     [{"folder": "—", "Δ": "—"}],
-                    use_container_width=True, hide_index=True,
+                    width="stretch", hide_index=True,
                 )
                 if any(v < 0 for _, v in d["top_shrink"]):
                     gc2.subheader(t("diff_top_shrink"))
                     gc2.dataframe(
                         [{"folder": k + "/", "Δ": f"−{human(-v)}"}
                          for k, v in d["top_shrink"] if v < 0],
-                        use_container_width=True, hide_index=True,
+                        width="stretch", hide_index=True,
                     )
 
 
@@ -2373,7 +2394,7 @@ with tab_compare:
                     t("tag_search_col_tags"): " · ".join(r["tags"]),
                     t("tag_search_col_note"): r.get("note", ""),
                 } for r in _ts_results],
-                use_container_width=True, hide_index=True,
+                width="stretch", hide_index=True,
             )
         else:
             st.info(t("tag_search_empty"))
@@ -2507,7 +2528,7 @@ with tab_compare:
                     margin=dict(l=10, r=10, t=10, b=10),
                     xaxis=dict(side="bottom"),
                 )
-                st.plotly_chart(_fig, use_container_width=True)
+                st.plotly_chart(_fig, width="stretch")
 
                 # ── flat table + CSV download ─────────────────────────────────
                 st.subheader(t("cross_details"))
@@ -2547,7 +2568,7 @@ with tab_compare:
                 )
                 st.dataframe(
                     _rows[:500 * 10],  # rows are per-copy, groups×copies
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
                 if len(_xgroups) > 500:
@@ -2605,7 +2626,7 @@ with tab_compare:
                           t("sc_col_count"): _v["count"]}
                          for _d, _v in sorted(_sc["per_drive"].items(),
                                               key=lambda kv: -kv[1]["bytes"])],
-                        use_container_width=True, hide_index=True,
+                        width="stretch", hide_index=True,
                     )
 
                 if _sc["by_folder"]:
@@ -2616,7 +2637,7 @@ with tab_compare:
                           t("sc_col_bytes"): human(_f["bytes"]),
                           t("sc_col_count"): _f["count"]}
                          for _f in _sc["by_folder"]],
-                        use_container_width=True, hide_index=True,
+                        width="stretch", hide_index=True,
                     )
 
                 # per-file list + full CSV export
@@ -2639,7 +2660,7 @@ with tab_compare:
                       t("sc_col_bytes"): human(_r["size"]),
                       t("sc_col_copies"): _r["internal_copies"]}
                      for _r in _sc["at_risk"][:2000]],
-                    use_container_width=True, hide_index=True,
+                    width="stretch", hide_index=True,
                 )
                 if len(_sc["at_risk"]) > 2000:
                     st.caption(t("sc_truncated", shown=2000,
@@ -2749,7 +2770,7 @@ with tab_compare:
                 for m in matches[:1000]
             ]
             st.dataframe(
-                display, use_container_width=True, hide_index=True,
+                display, width="stretch", hide_index=True,
             )
             if len(matches) > 1000:
                 st.caption(t("matches_not_shown", n=len(matches) - 1000))

@@ -4,7 +4,7 @@
 
 use drive_xray::db::{self, latest_snapshot_id};
 use drive_xray::index::{index_drive, refresh_drive, snapshot_drive, Mode};
-use drive_xray::snapshot::{diff, list, prune, take};
+use drive_xray::snapshot::{diff, list, prune};
 use std::fs;
 use std::path::Path;
 

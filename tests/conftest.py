@@ -16,15 +16,21 @@ DX_RUST = REPO / "rust" / "target" / "aarch64-apple-darwin" / "release" / "dx"
 DX_PY   = [sys.executable, str(REPO / "drive_xray.py")]
 
 
+def _test_env() -> dict:
+    env = os.environ.copy()
+    env["DRIVE_XRAY_NO_REGISTRY"] = "1"
+    return env
+
+
 def dx_rust(*args) -> subprocess.CompletedProcess:
     """Run the Rust dx binary; skip test if binary not built."""
     if not DX_RUST.exists():
         pytest.skip(f"Rust binary not found at {DX_RUST} — run bash build_rust.sh")
-    return subprocess.run([str(DX_RUST), *args], capture_output=True, text=True)
+    return subprocess.run([str(DX_RUST), *args], capture_output=True, text=True, env=_test_env())
 
 
 def dx_py(*args) -> subprocess.CompletedProcess:
-    return subprocess.run([*DX_PY, *args], capture_output=True, text=True)
+    return subprocess.run([*DX_PY, *args], capture_output=True, text=True, env=_test_env())
 
 
 @pytest.fixture()

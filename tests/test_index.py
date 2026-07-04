@@ -195,6 +195,33 @@ def test_doctor_detects_missing_index(rust_indexed_db):
     assert "idx_snap_size_partial" in r.stdout, r.stdout
 
 
+def test_python_doctor_detects_empty_snapshot_metadata(tmp_path):
+    """Doctor must fail when snapshot metadata says files exist but entries are empty."""
+    import sys; sys.path.insert(0, str(Path(__file__).parent.parent))
+    from drive_xray import doctor_db
+
+    db = tmp_path / "bad.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE drive (label TEXT, root_path TEXT, hash_version INTEGER);
+        CREATE TABLE snapshots (id INTEGER PRIMARY KEY, taken_at TEXT, label TEXT, total_files INTEGER, total_dirs INTEGER, total_size INTEGER);
+        CREATE TABLE paths (id INTEGER PRIMARY KEY, rel_path TEXT);
+        CREATE TABLE entries (id INTEGER PRIMARY KEY, snapshot_id INTEGER, path_id INTEGER, is_dir INTEGER, is_symlink INTEGER DEFAULT 0, size INTEGER, partial_hash BLOB);
+        CREATE INDEX idx_snap_parent ON entries(snapshot_id);
+        CREATE INDEX idx_snap_size_partial ON entries(snapshot_id,size,partial_hash);
+        CREATE INDEX idx_full ON entries(partial_hash);
+        CREATE INDEX idx_snap_inode ON entries(snapshot_id);
+        CREATE INDEX idx_snap_path_id ON entries(snapshot_id,path_id);
+    """)
+    conn.execute("INSERT INTO drive VALUES ('bad', '/', 2)")
+    conn.execute("INSERT INTO snapshots VALUES (1, '2026-01-01T00:00:00', 'bad', 10, 2, 1000)")
+    conn.commit(); conn.close()
+
+    r = doctor_db(db)
+    assert not r["ok"]
+    assert any(c["name"] == "entry_counts" and not c["ok"] for c in r["checks"])
+
+
 # ── symlinks ──────────────────────────────────────────────────────────────────
 
 def test_symlink_indexed_not_followed(tmp_path):

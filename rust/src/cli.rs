@@ -11,11 +11,11 @@ use std::path::PathBuf;
 /// a migration banner.
 const VERSION_SHORT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    " (schema v5 · hash v2)",
+    " (schema v6 · hash v2)",
 );
 const VERSION_LONG: &str = concat!(
     env!("CARGO_PKG_VERSION"), "\n",
-    "  schema:  v5 (path interning)\n",
+    "  schema:  v6 (path interning + metadata)\n",
     "  hash:    BLAKE2b v2 (head + middle + tail)\n",
     "  repo:    ", env!("CARGO_PKG_REPOSITORY"), "\n",
 );
