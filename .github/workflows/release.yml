@@ -190,3 +190,46 @@ jobs:
           files: |
             ${{ steps.vars.outputs.name }}.zip
             ${{ steps.vars.outputs.name }}.zip.sha256
+
+  build-windows:
+    name: build windows x86_64
+    runs-on: windows-latest
+    permissions:
+      contents: write   # append the Windows asset to the same release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: build
+        working-directory: rust
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      - name: package dx.exe
+        id: pkg
+        shell: pwsh
+        working-directory: rust
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          $name = "dx-$version-windows-x86_64"
+          $bin = "target/x86_64-pc-windows-msvc/release/dx.exe"
+          & $bin --version
+          Compress-Archive -Path $bin -DestinationPath "../$name.zip" -Force
+          (Get-FileHash "../$name.zip" -Algorithm SHA256).Hash.ToLower() `
+            | Out-File -NoNewline "../$name.zip.sha256"
+          "asset=$name" | Out-File -Append $env:GITHUB_OUTPUT
+
+      - name: publish windows asset to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.pkg.outputs.asset }}.zip
+            ${{ steps.pkg.outputs.asset }}.zip.sha256
