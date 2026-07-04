@@ -38,6 +38,48 @@ from drive_xray import (
     get_auto_tag_rules,
 )
 
+
+def pick_folder_dialog(initial: str | None = None) -> str | None:
+    """Open the OS-native folder chooser and return the chosen path, or None if
+    cancelled/unavailable. Runs on the machine hosting the app — intended for
+    local desktop use (it blocks the script until the user picks).
+
+    macOS uses AppleScript (reliable, unlike tkinter off Streamlit's worker
+    thread); Windows a WinForms dialog; Linux tries zenity then kdialog.
+    """
+    import platform
+    system = platform.system()
+    use_init = bool(initial and os.path.isdir(initial))
+    try:
+        if system == "Darwin":
+            loc = f' default location (POSIX file "{initial}")' if use_init else ""
+            out = subprocess.run(
+                ["osascript",
+                 "-e", f'set c to choose folder with prompt "Escolher pasta"{loc}',
+                 "-e", "POSIX path of c"],
+                capture_output=True, text=True, timeout=180)
+            return out.stdout.strip() or None
+        if system == "Windows":
+            ps = ("Add-Type -AssemblyName System.Windows.Forms;"
+                  "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+                  + (f"$d.SelectedPath='{initial}';" if use_init else "")
+                  + "if($d.ShowDialog() -eq 'OK'){$d.SelectedPath}")
+            out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                                 capture_output=True, text=True, timeout=180)
+            return out.stdout.strip() or None
+        for tool, argv in (("zenity", ["--file-selection", "--directory"]),
+                           ("kdialog", ["--getexistingdirectory", initial or "."])):
+            try:
+                out = subprocess.run([tool, *argv], capture_output=True,
+                                     text=True, timeout=180)
+                if out.stdout.strip():
+                    return out.stdout.strip()
+            except FileNotFoundError:
+                continue
+        return None
+    except Exception:
+        return None
+
 DB_DIR = get_db_dir()
 SCRIPT = Path(__file__).parent / "drive_xray.py"
 DB_DIR.mkdir(parents=True, exist_ok=True)
@@ -120,6 +162,8 @@ TRANSLATIONS = {
         "cancel": "Cancelar",
         "index_new_drive": "Indexar nova drive",
         "path_label": "Caminho",
+        "browse_btn": "📁 Procurar…",
+        "browse_hint": "Abre o Finder para escolheres a pasta.",
         "label_label": "Etiqueta",
         "full_hash_label": "Hash completo (--full)",
         "full_hash_help": "Lento, mas permite comparações offline confirmadas.",
@@ -417,6 +461,8 @@ TRANSLATIONS = {
         "cancel": "Cancel",
         "index_new_drive": "Index new drive",
         "path_label": "Path",
+        "browse_btn": "📁 Browse…",
+        "browse_hint": "Opens Finder to pick the folder.",
         "label_label": "Label",
         "full_hash_label": "Full hash (--full)",
         "full_hash_help": "Slow, but enables confirmed offline comparisons.",
@@ -1291,8 +1337,19 @@ with st.sidebar:
     st.divider()
     st.subheader(t("index_new_drive"))
 
+    # native folder picker — must live outside the form (forms allow only a
+    # submit button), so it writes the path into session_state and reruns.
+    st.session_state.setdefault("idx_root_v", "/Volumes/")
+    _pk1, _pk2 = st.columns([1, 2])
+    if _pk1.button(t("browse_btn"), key="pick_idx_btn", width="stretch"):
+        _picked = pick_folder_dialog(st.session_state.get("idx_root_v") or "/Volumes/")
+        if _picked:
+            st.session_state["idx_root_v"] = _picked
+            st.rerun()
+    _pk2.caption(t("browse_hint"))
+
     with st.form("idx_form"):
-        new_root = st.text_input(t("path_label"), "/Volumes/")
+        new_root = st.text_input(t("path_label"), key="idx_root_v")
         new_label = st.text_input(t("label_label"), "")
         do_full = st.checkbox(
             t("full_hash_label"), help=t("full_hash_help"),
@@ -1353,12 +1410,21 @@ with st.sidebar:
         _cur_dir = str(get_db_dir())
         st.caption(f"{t('settings_current_dir')}: `{_cur_dir}`")
 
-        _new_dir = st.text_input(
+        st.session_state.setdefault("cfg_db_dir_input", _cur_dir)
+        _dcol1, _dcol2 = st.columns([4, 1])
+        _new_dir = _dcol1.text_input(
             t("settings_db_dir"),
-            value=_cur_dir,
             help=t("settings_db_dir_help"),
             key="cfg_db_dir_input",
         )
+        _dcol2.markdown("<div style='height:1.75em'></div>",
+                        unsafe_allow_html=True)
+        if _dcol2.button(t("browse_btn"), key="pick_cfg_btn", width="stretch"):
+            _p = pick_folder_dialog(
+                st.session_state.get("cfg_db_dir_input") or str(Path.home()))
+            if _p:
+                st.session_state["cfg_db_dir_input"] = _p
+                st.rerun()
         _scol1, _scol2 = st.columns(2)
         if _scol1.button(t("settings_save"), width="stretch",
                          key="cfg_save_btn"):
