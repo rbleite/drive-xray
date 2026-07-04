@@ -271,6 +271,12 @@ TRANSLATIONS = {
         "at_rules_path": "Ficheiro de regras",
         "at_rules_created": "Ficheiro criado — edita-o para personalizar as regras.",
         # cold data (archive candidates) — Map tab
+        "upd_title": "🔄 Atualizações (GitHub)",
+        "upd_check": "Verificar atualizações",
+        "upd_uptodate": "✅ Já estás na versão mais recente.",
+        "upd_available": "🆕 {n} atualização(ões) disponível(eis):",
+        "upd_apply": "⬇️ Atualizar agora",
+        "upd_applying": "A atualizar…",
         "excl_title": "🚫 Excluir pastas da indexação",
         "excl_caption": "Pastas que NÃO queres indexar (ex.: caches, temporários). Aplicam-se no próximo refresh.",
         "excl_add": "Escolher pasta a excluir",
@@ -544,6 +550,12 @@ TRANSLATIONS = {
         "at_rules_path": "Rules file",
         "at_rules_created": "File created — edit it to customise the rules.",
         # cold data (archive candidates) — Map tab
+        "upd_title": "🔄 Updates (GitHub)",
+        "upd_check": "Check for updates",
+        "upd_uptodate": "✅ You're on the latest version.",
+        "upd_available": "🆕 {n} update(s) available:",
+        "upd_apply": "⬇️ Update now",
+        "upd_applying": "Updating…",
         "excl_title": "🚫 Exclude folders from indexing",
         "excl_caption": "Folders you do NOT want indexed (caches, temp…). Applied on the next refresh.",
         "excl_add": "Pick a folder to exclude",
@@ -1134,6 +1146,27 @@ with st.sidebar:
 
     st.title("💾 drive-xray")
     st.caption(f"engine: {'🦀 Rust' if DX_IS_RUST else '🐍 Python'}  ·  `{DX_CMD[0]}`")
+
+    # ── self-update from GitHub ────────────────────────────────────────────
+    with st.expander(t("upd_title"), expanded=False):
+        import update as _upd
+        if st.button(t("upd_check"), key="upd_check", use_container_width=True):
+            st.session_state["upd_status"] = _upd.check_updates()
+        _st = st.session_state.get("upd_status")
+        if _st:
+            if not _st.get("ok"):
+                st.warning(_st.get("error"))
+            elif _st["behind"] == 0:
+                st.success(t("upd_uptodate"))
+            else:
+                st.info(t("upd_available", n=_st["behind"]))
+                for _c in _st["commits"][:8]:
+                    st.caption(f"• {_c}")
+                if st.button(t("upd_apply"), type="primary", key="upd_apply"):
+                    with st.spinner(t("upd_applying")):
+                        _res = _upd.apply_update()
+                    (st.success if _res.get("ok") else st.error)(_res.get("message"))
+                    st.session_state.pop("upd_status", None)
 
     # whether an indexer/refresher is currently running (this session)
     proc_running = (
