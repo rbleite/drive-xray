@@ -29,6 +29,7 @@ from drive_xray import (
     latest_snapshot_id, list_snapshots, diff_snapshots,
     registry_list, registry_remove, registry_register,
     cross_dedupe, single_copy_files, cold_data, read_drive_index_opts,
+    generate_backup_script,
     verify_file, execute_file_action, QUARANTINE_DIR, AUDIT_LOG,
     read_config, write_config, get_db_dir, import_folder,
     get_exclusions, set_exclusions,
@@ -215,6 +216,12 @@ TRANSLATIONS = {
         "sc_col_copies": "cópias internas",
         "sc_files_title": "📋 Ficheiros sem cópia (top {n} por tamanho)",
         "sc_download_csv": "⬇️ Exportar CSV (todos os ficheiros em risco)",
+        "bkp_title": "💾 Gerar script de backup",
+        "bkp_caption": "Cria um script que copia estes ficheiros sem cópia para uma drive-alvo (por drive de origem). NÃO executa nada — revês e corres tu. As drives de origem têm de estar montadas.",
+        "bkp_target": "Pasta de destino",
+        "bkp_shell": "Formato",
+        "bkp_download": "⬇️ Descarregar script de backup",
+        "bkp_preview": "Ver script",
         "sc_truncated": "Tabela mostra os maiores {shown} de {total} itens; o CSV inclui todos.",
         "compare_with": "Comparar com",
         "minimum_mb": "Mínimo (MB)",
@@ -506,6 +513,12 @@ TRANSLATIONS = {
         "sc_col_copies": "internal copies",
         "sc_files_title": "📋 Files with no backup (top {n} by size)",
         "sc_download_csv": "⬇️ Export CSV (all at-risk files)",
+        "bkp_title": "💾 Generate backup script",
+        "bkp_caption": "Builds a script that copies these un-backed-up files to a target drive (per source drive). It does NOT run anything — review and run it yourself. Source drives must be mounted.",
+        "bkp_target": "Target folder",
+        "bkp_shell": "Format",
+        "bkp_download": "⬇️ Download backup script",
+        "bkp_preview": "Preview script",
         "sc_truncated": "Table shows the largest {shown} of {total} items; the CSV has them all.",
         "compare_with": "Compare with",
         "minimum_mb": "Minimum (MB)",
@@ -2631,6 +2644,31 @@ with tab_compare:
                 if len(_sc["at_risk"]) > 2000:
                     st.caption(t("sc_truncated", shown=2000,
                                  total=_sc["at_risk_count"]))
+
+                # ── generate a backup script for the at-risk files ────────────
+                st.divider()
+                st.markdown(f"**{t('bkp_title')}**")
+                st.caption(t("bkp_caption"))
+                _bt1, _bt2 = st.columns([3, 1])
+                _bkp_target = _bt1.text_input(t("bkp_target"),
+                                              value="/Volumes/", key="bkp_target")
+                _bkp_shell = _bt2.selectbox(t("bkp_shell"),
+                                            ["rsync (.sh)", "robocopy (.bat)"],
+                                            key="bkp_shell")
+                if _bkp_target.strip():
+                    _shell = "bat" if "bat" in _bkp_shell else "sh"
+                    _db_labels_b = [(_db, _reg_entries.get(_db.resolve(), {})
+                                     .get("label", _db.stem)) for _db in dbs]
+                    _script = generate_backup_script(_sc, _db_labels_b,
+                                                     _bkp_target.strip(), _shell)
+                    st.download_button(
+                        t("bkp_download"), data=_script.encode(),
+                        file_name=f"backup-at-risk.{'bat' if _shell=='bat' else 'sh'}",
+                        mime="text/plain", key="bkp_dl")
+                    with st.expander(t("bkp_preview"), expanded=False):
+                        st.code(_script[:4000]
+                                + ("\n… (truncado)" if len(_script) > 4000 else ""),
+                                language="bash")
 
     st.divider()
 

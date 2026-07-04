@@ -2718,6 +2718,69 @@ def cold_data(
     }
 
 
+def generate_backup_script(result: dict, db_labels: list, target_dir: str,
+                           shell: str = "sh") -> str:
+    """Turn a `single_copy_files` result into a copy script that backs up the
+    at-risk files (those on only ONE drive) to `target_dir`, namespaced by
+    source drive. NOT executed here — the user reviews and runs it.
+
+    shell='sh'  → rsync with --files-from (macOS/Linux; source drives mounted).
+    shell='bat' → robocopy per source drive (Windows).
+    """
+    roots: dict[str, str] = {}
+    for db, label in db_labels:
+        try:
+            conn = open_db(db)
+            row = conn.execute("SELECT root_path FROM drive LIMIT 1").fetchone()
+            conn.close()
+            if row and row[0]:
+                roots[label] = row[0]
+        except Exception:
+            pass
+    by_drive: dict[str, list[str]] = defaultdict(list)
+    for r in result.get("at_risk", []):
+        by_drive[r["drive"]].append(r["rel_path"])
+
+    if shell == "bat":
+        out = ["@echo off",
+               "REM drive-xray backup — copies files that exist on only ONE",
+               "REM drive to your backup target. Review before running.",
+               f"REM target: {target_dir}", ""]
+        for label, rels in by_drive.items():
+            src = roots.get(label)
+            if not src:
+                continue
+            out.append(f"REM ==== {label}: {len(rels)} files ====")
+            for rel in rels:
+                w = rel.replace("/", "\\")
+                sub = w.rsplit("\\", 1)[0] if "\\" in w else ""
+                out.append(
+                    f'robocopy "{src}\\{sub}" "{target_dir}\\{label}\\{sub}" '
+                    f'"{w.rsplit(chr(92),1)[-1]}" /COPY:DAT /R:1 /W:1 /NFL /NDL')
+            out.append("")
+        return "\n".join(out)
+
+    # default: rsync
+    out = ["#!/usr/bin/env bash",
+           "# drive-xray backup — copies files that exist on only ONE drive to",
+           "# your backup target, keeping per-drive folders. Review before running.",
+           "# Source drives must be mounted at their original paths.",
+           f"#   target: {target_dir}",
+           "set -euo pipefail", ""]
+    for label, rels in by_drive.items():
+        src = roots.get(label)
+        if not src:
+            out.append(f"# (skipped {label} — source root unknown)")
+            continue
+        dest = f"{target_dir.rstrip('/')}/{label}"
+        out += [f'echo ">> {label}: {len(rels)} files"',
+                f'mkdir -p "{dest}"',
+                f'rsync -a --info=progress2 --files-from=- "{src}/" "{dest}/" <<\'FILES\'']
+        out += rels
+        out += ["FILES", ""]
+    return "\n".join(out)
+
+
 def verify_integrity(db_path: Path, full: bool = False, progress=None) -> dict:
     """Re-read every file and compare its hash to the one stored at index time —
     detects silent corruption (bit-rot): a file whose size + mtime are UNCHANGED
