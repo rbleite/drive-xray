@@ -136,13 +136,14 @@ pub fn index_drive(
                                      mode, target_snapshot_id)?;
 
     // -------- phase 1: walk --------
+    let exclude = db::read_exclusions(&conn).unwrap_or_default();
     let t0 = Instant::now();
-    let walk_res = walker::walk(&root_canon, one_fs, skip_cloud)?;
+    let walk_res = walker::walk(&root_canon, one_fs, skip_cloud, &exclude)?;
     let n_walked = walk_res.entries.len();
     let stats = &walk_res.stats;
-    eprintln!("  walk: {} entries in {:.1}s (firmlinks_skipped={}, crossed={}, cloud_skipped={})",
+    eprintln!("  walk: {} entries in {:.1}s (firmlinks_skipped={}, crossed={}, cloud_skipped={}, excluded={})",
         n_walked, t0.elapsed().as_secs_f64(),
-        stats.firmlinks_skipped, stats.crossed, stats.cloud_skipped);
+        stats.firmlinks_skipped, stats.crossed, stats.cloud_skipped, stats.excluded);
 
     // -------- phase 2: hash (parallel) --------
     let t1 = Instant::now();

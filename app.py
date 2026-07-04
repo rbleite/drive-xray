@@ -31,6 +31,7 @@ from drive_xray import (
     cross_dedupe, single_copy_files, cold_data, read_drive_index_opts,
     verify_file, execute_file_action, QUARANTINE_DIR, AUDIT_LOG,
     read_config, write_config, get_db_dir, import_folder,
+    get_exclusions, set_exclusions,
     tags_get, tags_set, tags_search, notes_get, notes_set,
     compute_auto_tags, AUTO_TAGS_YAML_PATH, write_default_auto_tag_rules,
     get_auto_tag_rules,
@@ -270,6 +271,15 @@ TRANSLATIONS = {
         "at_rules_path": "Ficheiro de regras",
         "at_rules_created": "Ficheiro criado — edita-o para personalizar as regras.",
         # cold data (archive candidates) — Map tab
+        "excl_title": "🚫 Excluir pastas da indexação",
+        "excl_caption": "Pastas que NÃO queres indexar (ex.: caches, temporários). Aplicam-se no próximo refresh.",
+        "excl_add": "Escolher pasta a excluir",
+        "excl_or_type": "…ou escrever",
+        "excl_add_btn": "➕ Excluir",
+        "excl_added": "Exclusão adicionada — faz refresh para aplicar.",
+        "excl_current": "Excluídas nesta drive:",
+        "excl_refresh_hint": "🔄 Faz refresh da drive para aplicar as exclusões.",
+        "excl_none": "Sem exclusões nesta drive.",
         "cold_title": "❄️ Dados frios (candidatos a arquivo)",
         "cold_badge": "dados frios",
         "cold_map_hint": "❄️ As pastas frias estão realçadas a azul-gélido no TreeMap acima.",
@@ -534,6 +544,15 @@ TRANSLATIONS = {
         "at_rules_path": "Rules file",
         "at_rules_created": "File created — edit it to customise the rules.",
         # cold data (archive candidates) — Map tab
+        "excl_title": "🚫 Exclude folders from indexing",
+        "excl_caption": "Folders you do NOT want indexed (caches, temp…). Applied on the next refresh.",
+        "excl_add": "Pick a folder to exclude",
+        "excl_or_type": "…or type",
+        "excl_add_btn": "➕ Exclude",
+        "excl_added": "Exclusion added — refresh to apply.",
+        "excl_current": "Excluded on this drive:",
+        "excl_refresh_hint": "🔄 Refresh the drive to apply exclusions.",
+        "excl_none": "No exclusions on this drive.",
         "cold_title": "❄️ Cold data (archive candidates)",
         "cold_badge": "cold data",
         "cold_map_hint": "❄️ Cold folders are highlighted in icy blue on the TreeMap above.",
@@ -2052,6 +2071,37 @@ with tab_map:
              for _exts, _tag in _at_rules],
             use_container_width=True, hide_index=True,
         )
+
+    # ── folder exclusions ─────────────────────────────────────────────────────
+    with st.expander(t("excl_title"), expanded=False):
+        st.caption(t("excl_caption"))
+        _excl = get_exclusions(selected_db)
+        _excl_folders = sorted({
+            r["rel_path"] for r in rows
+            if r["kind"] == "folder" and r["rel_path"] != "."
+        }) if rows else []
+        _ec1, _ec2 = st.columns([3, 1])
+        _pick = _ec1.selectbox(t("excl_add"), [""] + _excl_folders,
+                               key="excl_pick")
+        _typed = _ec2.text_input(t("excl_or_type"), key="excl_typed",
+                                 label_visibility="visible")
+        if st.button(t("excl_add_btn"), key="excl_add_btn"):
+            _new = (_typed.strip() or _pick).strip("/").replace("\\", "/")
+            if _new and _new not in _excl:
+                set_exclusions(selected_db, _excl + [_new])
+                st.toast(t("excl_added"), icon="🚫")
+                st.rerun()
+        if _excl:
+            st.caption(t("excl_current"))
+            for _e in _excl:
+                _c1, _c2 = st.columns([5, 1])
+                _c1.code(_e, language=None)
+                if _c2.button("✕", key=f"excl_rm_{_e}"):
+                    set_exclusions(selected_db, [x for x in _excl if x != _e])
+                    st.rerun()
+            st.info(t("excl_refresh_hint"))
+        else:
+            st.caption(t("excl_none"))
 
     # ── cold data (archive candidates) ────────────────────────────────────────
     with st.expander(t("cold_title"), expanded=False):

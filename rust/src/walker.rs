@@ -63,6 +63,7 @@ pub struct WalkStats {
     pub crossed: usize,           // subtrees pruned because they sit on another fs
     pub cloud_skipped: usize,     // subtrees pruned by --skip-cloud
     pub firmlinks_skipped: usize, // subtrees pruned because inode already visited (APFS firmlinks)
+    pub excluded: usize,          // subtrees pruned by a user exclusion
 }
 
 #[derive(Debug, Default)]
@@ -168,7 +169,8 @@ fn win_file_info(path: &std::path::Path) -> Option<(u64, u64)> {
 /// Walk `root` synchronously, applying our filters. Returns entries in
 /// top-down DFS order so the writer can resolve parent_id from a running
 /// `HashMap<rel_path, rowid>`.
-pub fn walk(root: &Path, one_fs: bool, skip_cloud: bool) -> Result<WalkResult> {
+pub fn walk(root: &Path, one_fs: bool, skip_cloud: bool,
+            exclude: &[String]) -> Result<WalkResult> {
     let root = root.canonicalize()?;
     let root_md = fs::symlink_metadata(&root)?;
     if !root_md.is_dir() {
@@ -272,6 +274,14 @@ pub fn walk(root: &Path, one_fs: bool, skip_cloud: bool) -> Result<WalkResult> {
             if is_dir {
                 // Skip-list (always applied).
                 if SKIP_DIR_NAMES.contains(&name.as_str()) {
+                    continue;
+                }
+                // User exclusions: prune a folder (by its rel_path) and its subtree.
+                if !exclude.is_empty()
+                    && exclude.iter().any(|e| rel == *e
+                        || rel.starts_with(&format!("{}/", e)))
+                {
+                    stats.excluded += 1;
                     continue;
                 }
                 // --skip-cloud: prune cloud-sync folders entirely.
@@ -384,7 +394,7 @@ mod tests {
     #[test]
     fn skip_dir_names_default() {
         let td = make_tree();
-        let r = walk(td.path(), false, false).unwrap();
+        let r = walk(td.path(), false, false, &[]).unwrap();
         let paths = rel_paths(&r);
         // .Spotlight-V100 should never appear.
         assert!(!paths.iter().any(|p| p.contains(".Spotlight-V100")));
@@ -396,7 +406,7 @@ mod tests {
     #[test]
     fn skip_cloud_filters() {
         let td = make_tree();
-        let r = walk(td.path(), false, true).unwrap();
+        let r = walk(td.path(), false, true, &[]).unwrap();
         let paths = rel_paths(&r);
         assert!(!paths.iter().any(|p| p.starts_with("OneDrive")));
         // CloudStorage is also pruned (matches by prefix).
@@ -409,7 +419,7 @@ mod tests {
     #[test]
     fn root_is_first_entry() {
         let td = make_tree();
-        let r = walk(td.path(), false, false).unwrap();
+        let r = walk(td.path(), false, false, &[]).unwrap();
         assert_eq!(r.entries[0].rel_path, ".");
         assert!(r.entries[0].is_dir);
         assert!(r.entries[0].parent_rel.is_none());
@@ -422,7 +432,7 @@ mod tests {
     #[test]
     fn parent_appears_before_children() {
         let td = make_tree();
-        let r = walk(td.path(), false, true).unwrap();
+        let r = walk(td.path(), false, true, &[]).unwrap();
         let paths = rel_paths(&r);
         // Index of a parent must be < index of any of its children.
         let idx = |p: &str| paths.iter().position(|x| x == p);
@@ -436,7 +446,7 @@ mod tests {
     #[test]
     fn metadata_populated_for_files() {
         let td = make_tree();
-        let r = walk(td.path(), false, true).unwrap();
+        let r = walk(td.path(), false, true, &[]).unwrap();
         let top = r.entries.iter().find(|e| e.rel_path == "top.txt").unwrap();
         assert!(!top.is_dir);
         assert!(!top.is_symlink);

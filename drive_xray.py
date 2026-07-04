@@ -388,7 +388,39 @@ CREATE TABLE IF NOT EXISTS folder_meta (
     note     TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS exclusions (rel_path TEXT PRIMARY KEY);
 """
+
+
+def get_exclusions(db_path) -> list[str]:
+    """User-configured folder exclusions (rel_path prefixes) for this drive."""
+    try:
+        conn = sqlite3.connect(db_path)
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "exclusions" not in tables:
+            conn.close()
+            return []
+        rows = [r[0] for r in conn.execute(
+            "SELECT rel_path FROM exclusions ORDER BY rel_path")]
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+
+def set_exclusions(db_path, rel_paths: list[str]) -> None:
+    """Replace the exclusion list. Paths are drive-root-relative; forward
+    slashes; no leading/trailing slash."""
+    clean = sorted({p.strip().strip("/").replace("\\", "/")
+                    for p in rel_paths if p.strip().strip("/")})
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE IF NOT EXISTS exclusions (rel_path TEXT PRIMARY KEY)")
+    conn.execute("DELETE FROM exclusions")
+    conn.executemany("INSERT OR IGNORE INTO exclusions (rel_path) VALUES (?)",
+                     [(p,) for p in clean])
+    conn.commit()
+    conn.close()
 
 
 def _migrate_to_v3(conn: sqlite3.Connection) -> bool:
@@ -1284,6 +1316,8 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
 
     cur = conn.cursor()
 
+    _exclusions = get_exclusions(db_path)   # user folder exclusions (rel prefixes)
+    excluded_skipped = 0
     root_dev = root.stat().st_dev if one_fs else None
     # Track visited directory (inode, device) pairs to detect APFS firmlinks.
     # macOS firmlinks expose the same directory tree under two paths
@@ -1333,6 +1367,17 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=lambda e: None):
         # prune skip dirs in-place
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES]
+        # prune user-excluded folders (by drive-root-relative path)
+        if _exclusions:
+            _dp0 = Path(dirpath)
+            _kept = []
+            for d in dirnames:
+                _rel = str((_dp0 / d).relative_to(root)).replace("\\", "/")
+                if any(_rel == e or _rel.startswith(e + "/") for e in _exclusions):
+                    excluded_skipped += 1
+                else:
+                    _kept.append(d)
+            dirnames[:] = _kept
         # prune cloud-sync folders
         if skip_cloud:
             before = len(dirnames)

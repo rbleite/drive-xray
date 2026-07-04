@@ -68,10 +68,23 @@ CREATE INDEX IF NOT EXISTS idx_snap_parent ON entries(snapshot_id, parent_id);
 CREATE INDEX IF NOT EXISTS idx_snap_size_partial ON entries(snapshot_id, size, partial_hash) WHERE is_dir=0;
 CREATE INDEX IF NOT EXISTS idx_full ON entries(full_hash);
 CREATE INDEX IF NOT EXISTS idx_snap_inode ON entries(snapshot_id, inode, device);
+CREATE TABLE IF NOT EXISTS exclusions (rel_path TEXT PRIMARY KEY);
 "#;
 
 /// Backwards-compatible alias used elsewhere in the crate.
 pub const SCHEMA_V4: &str = SCHEMA_V5;
+
+/// User-configured folder exclusions (rel_path prefixes) for this drive.
+pub fn read_exclusions(conn: &Connection) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT rel_path FROM exclusions") {
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for r in rows {
+            out.push(r?);
+        }
+    }
+    Ok(out)
+}
 
 /// Open a db at `path`, running v2→v3 and v3→v4 migrations as needed,
 /// applying `SCHEMA_V4`, then setting WAL + foreign keys. Idempotent.
