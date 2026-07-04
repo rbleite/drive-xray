@@ -2745,7 +2745,7 @@ def generate_backup_script(result: dict, db_labels: list, target_dir: str,
             pass
     by_drive: dict[str, list[str]] = defaultdict(list)
     for r in result.get("at_risk", []):
-        by_drive[r["drive"]].append(r["rel_path"])
+        by_drive[r["drive"]].append(r["path"])
 
     if shell == "bat":
         out = ["@echo off",
