@@ -2411,11 +2411,13 @@ with tab_compare:
         min_size_mb_x = st.slider(
             t("minimum_mb"), 0, 500, 1, key="xdp_min"
         )
+        # built unconditionally: the results block below runs on every rerun from
+        # session_state, so it must not depend on the button-click branch.
+        db_labels = []
+        for _db in dbs:
+            _reg = _reg_entries.get(_db.resolve(), {})
+            db_labels.append((_db, _reg.get("label", _db.stem)))
         if st.button(t("cross_btn"), type="primary", key="xdp_btn"):
-            db_labels = []
-            for _db in dbs:
-                _reg = _reg_entries.get(_db.resolve(), {})
-                db_labels.append((_db, _reg.get("label", _db.stem)))
             _min_size_bytes = min_size_mb_x * 1024 * 1024
             with st.spinner(t("calculating")):
                 if DX_IS_RUST:
