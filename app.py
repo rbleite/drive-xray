@@ -60,8 +60,11 @@ def _dx_command_prefix() -> list[str]:
     if env and Path(env).is_file() and os.access(env, os.X_OK):
         return [env]
     here = Path(__file__).parent / "rust" / "target"
-    for cand in (here / "universal" / "dx",
-                 here / "release" / "dx"):
+    # binary name is dx on unix, dx.exe on Windows (no universal build there)
+    exe = "dx.exe" if os.name == "nt" else "dx"
+    for cand in (here / "universal" / exe,
+                 here / "release" / exe,
+                 here / "debug" / exe):
         if cand.is_file() and os.access(cand, os.X_OK):
             return [str(cand)]
     on_path = shutil.which("dx")
