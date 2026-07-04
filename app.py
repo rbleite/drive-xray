@@ -235,6 +235,18 @@ TRANSLATIONS = {
         "download_xlsx": "⬇️ Exportar Excel (XLSX)",
         "db_size": "Tamanho .db",
         "compact_button": "🧹 Compactar",
+        "verify_title": "🔬 Verificar integridade (bit-rot)",
+        "verify_caption": "Relê os ficheiros e compara o hash com o guardado — deteta corrupção silenciosa (mesmo tamanho e data, conteúdo diferente). Precisa da drive montada.",
+        "verify_full": "Verificação profunda (ficheiro inteiro)",
+        "verify_full_help": "Mais lento e completo; só para ficheiros com hash completo guardado. Por defeito usa o hash parcial (rápido).",
+        "verify_btn": "🔬 Verificar agora",
+        "verify_running": "A verificar…",
+        "verify_corrupt_short": "corrompidos",
+        "verify_changed": "Tamanho mudou",
+        "verify_missing": "Em falta",
+        "verify_unmounted": "⚠️ Drive não montada em `{root}` — não dá para verificar. Monta o disco.",
+        "verify_rot_found": "🚨 {n} ficheiro(s) com BIT-ROT — conteúdo alterado com o mesmo tamanho+data. NÃO os copies por cima dos backups bons.",
+        "verify_clean": "✅ Sem corrupção — todos os ficheiros batem certo com o hash guardado.",
         "compact_help": "VACUUM + checkpoint WAL para libertar espaço. Sem perda de dados.",
         # treemap
         "tab_map": "🗺️ Mapa",
@@ -514,6 +526,18 @@ TRANSLATIONS = {
         "download_xlsx": "⬇️ Export Excel (XLSX)",
         "db_size": ".db size",
         "compact_button": "🧹 Compact",
+        "verify_title": "🔬 Verify integrity (bit-rot)",
+        "verify_caption": "Re-reads files and compares hashes to the stored ones — catches silent corruption (same size+date, different content). Drive must be mounted.",
+        "verify_full": "Deep verify (whole file)",
+        "verify_full_help": "Slower and thorough; only for files with a stored full hash. Defaults to the fast partial hash.",
+        "verify_btn": "🔬 Verify now",
+        "verify_running": "Verifying…",
+        "verify_corrupt_short": "corrupted",
+        "verify_changed": "Size changed",
+        "verify_missing": "Missing",
+        "verify_unmounted": "⚠️ Drive not mounted at `{root}` — cannot verify. Mount it.",
+        "verify_rot_found": "🚨 {n} file(s) with BIT-ROT — content changed with the same size+date. Do NOT copy these over your good backups.",
+        "verify_clean": "✅ No corruption — every file matches its stored hash.",
         "compact_help": "VACUUM + WAL checkpoint to reclaim space. No data loss.",
         # treemap
         "tab_map": "🗺️ Map",
@@ -1535,6 +1559,41 @@ with tab_summary:
                  or str(selected_db.resolve()) in _busy_procs):
         start_compact(selected_db)
         st.rerun()
+
+    # ── integrity / bit-rot verification ──────────────────────────────────────
+    with st.expander(t("verify_title"), expanded=False):
+        st.caption(t("verify_caption"))
+        _vfull = st.checkbox(t("verify_full"), value=False,
+                             help=t("verify_full_help"))
+        if st.button(t("verify_btn"), key="verify_btn"):
+            from drive_xray import verify_integrity
+            _vbar = st.progress(0.0, text=t("verify_running"))
+            def _vcb(i, n, c):
+                _vbar.progress(i / max(n, 1),
+                               text=f"{i}/{n} · {c} {t('verify_corrupt_short')}")
+            _vres = verify_integrity(selected_db, full=_vfull, progress=_vcb)
+            st.session_state["verify_result"] = _vres
+            st.session_state["verify_result_db"] = str(selected_db)
+        _vr = st.session_state.get("verify_result")
+        if _vr and st.session_state.get("verify_result_db") == str(selected_db):
+            if not _vr["root_mounted"]:
+                st.warning(t("verify_unmounted", root=_vr["root"]))
+            else:
+                vc1, vc2, vc3, vc4 = st.columns(4)
+                vc1.metric("✅ OK", f"{_vr['ok']:,}")
+                vc2.metric("⚠️ " + t("verify_corrupt_short"),
+                           f"{len(_vr['corrupted']):,}")
+                vc3.metric(t("verify_changed"), f"{_vr['size_changed']:,}")
+                vc4.metric(t("verify_missing"), f"{_vr['missing']:,}")
+                if _vr["corrupted"]:
+                    st.error(t("verify_rot_found", n=len(_vr["corrupted"])))
+                    st.dataframe(
+                        [{"": "⚠️", t("tags_col_path"): c["rel_path"],
+                          t("db_size"): human(c["size"] or 0)}
+                         for c in _vr["corrupted"][:500]],
+                        use_container_width=True, hide_index=True)
+                else:
+                    st.success(t("verify_clean"))
 
     def _compute_ext():
         db = selected_db

@@ -2718,6 +2718,65 @@ def cold_data(
     }
 
 
+def verify_integrity(db_path: Path, full: bool = False, progress=None) -> dict:
+    """Re-read every file and compare its hash to the one stored at index time —
+    detects silent corruption (bit-rot): a file whose size + mtime are UNCHANGED
+    but whose content hash now differs. The regular refresh trusts (size, mtime)
+    and never re-reads such files, so this is the only thing that catches rot
+    before a good backup gets overwritten with a corrupt copy.
+
+    Requires the drive mounted. `full=True` uses the whole-file BLAKE2b (only for
+    files that have a stored full_hash); otherwise the fast partial hash
+    (head+middle+tail) is compared — a cheap screen that catches most rot.
+
+    Returns:
+        {root_mounted, total, ok, corrupted:[{rel_path,size}], size_changed,
+         missing, unreadable, mode}
+    """
+    conn = open_db(db_path)
+    row = conn.execute("SELECT root_path FROM drive LIMIT 1").fetchone()
+    root = Path(row[0]) if row and row[0] else None
+    sid = latest_snapshot_id(conn)
+    res = {"root_mounted": bool(root and root.is_dir()), "total": 0, "ok": 0,
+           "corrupted": [], "size_changed": 0, "missing": 0, "unreadable": 0,
+           "mode": "full" if full else "partial", "root": str(root or "")}
+    if sid is None or not res["root_mounted"]:
+        conn.close()
+        return res
+    rows = conn.execute(
+        "SELECT rel_path, size, partial_hash, full_hash FROM entries"
+        " WHERE snapshot_id=? AND is_dir=0 AND is_symlink=0 AND error IS NULL"
+        "   AND partial_hash IS NOT NULL", (sid,),
+    ).fetchall()
+    conn.close()
+    res["total"] = len(rows)
+    for i, (rel, size, phash, fhash) in enumerate(rows):
+        p = root / rel
+        try:
+            st = p.stat()
+        except OSError:
+            res["missing"] += 1
+            continue
+        if st.st_size != (size or 0):
+            res["size_changed"] += 1        # a real edit, not rot — skip
+            continue
+        if full and fhash is not None:
+            new, stored = full_hash(p), fhash
+        else:
+            new, stored = partial_hash(p, size or 0), phash
+        if new is None:
+            res["unreadable"] += 1
+        elif new != stored:
+            res["corrupted"].append({"rel_path": rel, "size": size})
+        else:
+            res["ok"] += 1
+        if progress and i % 500 == 0:
+            progress(i + 1, len(rows), len(res["corrupted"]))
+    if progress:
+        progress(len(rows), len(rows), len(res["corrupted"]))
+    return res
+
+
 def read_drive_index_opts(db_labels: list[tuple[Path, str]]) -> dict[str, dict]:
     """Return {label: {"one_fs": bool, "skip_cloud": bool}} from each db's
     drive table. Drives that can't be read are omitted."""
@@ -2910,6 +2969,16 @@ def main():
                      help="ignore folders smaller than this (default 100 MB)")
     pco.add_argument("--json", action="store_true",
                      help="emit the full result as JSON")
+
+    pv = sub.add_parser(
+        "verify",
+        help="detect bit-rot: re-hash files and compare to the stored hash",
+    )
+    pv.add_argument("db", type=Path)
+    pv.add_argument("--full", action="store_true",
+                    help="compare whole-file hashes (slower, thorough) instead"
+                         " of the fast partial hash")
+    pv.add_argument("--json", action="store_true", help="emit result as JSON")
 
     args = p.parse_args()
 
@@ -3150,6 +3219,28 @@ def main():
             if result["truncated"]:
                 print(f"\n  (list capped; {result['total_folders']:,} folders total)",
                       file=sys.stderr)
+
+    elif args.cmd == "verify":
+        def _prog(i, n, c):
+            print(f"\r  verifying {i}/{n} ({c} corrupted)…", end="", file=sys.stderr)
+        r = verify_integrity(args.db, full=args.full,
+                             progress=None if args.json else _prog)
+        if args.json:
+            print(json.dumps(r))
+        else:
+            print(file=sys.stderr)
+            if not r["root_mounted"]:
+                sys.exit(f"drive not mounted at {r['root']} — cannot verify.")
+            print(f"verify ({r['mode']}) of {r['total']} files: {r['ok']} ok · "
+                  f"{len(r['corrupted'])} CORRUPTED · {r['size_changed']} changed · "
+                  f"{r['missing']} missing · {r['unreadable']} unreadable")
+            if r["corrupted"]:
+                print("\n  ⚠️  BIT-ROT — content changed with same size+mtime:")
+                for c in r["corrupted"][:100]:
+                    print(f"     {human(c['size'] or 0):>10}  {c['rel_path']}")
+                if len(r["corrupted"]) > 100:
+                    print(f"     … +{len(r['corrupted'])-100} more")
+                sys.exit(1)
 
 
 if __name__ == "__main__":
