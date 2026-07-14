@@ -73,14 +73,6 @@ pub fn build_reuse_cache(conn: &Connection) -> Result<ReuseCache> {
     Ok(cache)
 }
 
-/// Each phase 2 row: the original walker entry + computed hashes.
-struct HashedEntry {
-    entry: RawEntry,
-    partial: Option<[u8; 16]>,
-    full: Option<[u8; 32]>,
-    reused: bool,
-}
-
 /// Drop-in port of `index_drive()` from `drive_xray.py`. Returns the
 /// snapshot_id that was written into.
 pub fn index_drive(
@@ -145,26 +137,32 @@ pub fn index_drive(
         n_walked, t0.elapsed().as_secs_f64(),
         stats.firmlinks_skipped, stats.crossed, stats.cloud_skipped, stats.excluded);
 
-    // -------- phase 2: hash (parallel) --------
-    let t1 = Instant::now();
-    let hashed = hash_phase(
-        &root_canon, walk_res.entries, do_full, reuse_old.as_ref(),
-    );
-    let n_reused = hashed.iter().filter(|h| h.reused).count();
+    // -------- phase 2: write the file tree FIRST (no hashes yet) --------
+    // Persisting the structure right after the walk means a long scan
+    // interrupted during hashing (the slow, I/O-bound phase on big/slow disks)
+    // keeps every file already walked, instead of losing hours of work to a
+    // single final commit.
+    let entries = walk_res.entries;
+    let t2 = Instant::now();
+    let (row_ids, total_files, total_dirs, total_size) =
+        write_structure_phase(db_path, snap_id, &entries)?;
     eprintln!(
-        "  hash: {} candidates in {:.1}s ({} reused)",
-        hashed.iter().filter(|h| h.partial.is_some()).count(),
-        t1.elapsed().as_secs_f64(),
-        n_reused,
+        "  write-structure: {} files / {} dirs / {} bytes in {:.1}s",
+        total_files, total_dirs, total_size, t2.elapsed().as_secs_f64()
     );
 
-    // -------- phase 3: write --------
-    let t2 = Instant::now();
-    let (total_files, total_dirs, total_size) =
-        write_phase(db_path, snap_id, hashed)?;
+    // -------- phase 3: hash (parallel) + UPDATE incrementally --------
+    // Hashes are computed in parallel and written back in committed batches, so
+    // a crash leaves a usable partial snapshot. A later `refresh` rebuilds its
+    // reuse-cache from the rows already hashed (partial_hash IS NOT NULL) and
+    // skips re-reading them — effectively resuming where it stopped.
+    let t1 = Instant::now();
+    let (n_hashed, n_reused) = hash_update_phase(
+        db_path, &root_canon, &entries, &row_ids, do_full, reuse_old.as_ref(),
+    )?;
     eprintln!(
-        "  write: {} files / {} dirs / {} bytes in {:.1}s",
-        total_files, total_dirs, total_size, t2.elapsed().as_secs_f64()
+        "  hash: {} candidates in {:.1}s ({} reused)",
+        n_hashed, t1.elapsed().as_secs_f64(), n_reused,
     );
 
     // -------- rebuild indexes (paired with the earlier drop) --------
@@ -271,112 +269,154 @@ fn allocate_snapshot(
     }
 }
 
-fn hash_phase(
+/// Phase 3: hash file entries in parallel and write the hashes back with
+/// `UPDATE … WHERE id=?`, processing in chunks so each committed batch is a
+/// durable checkpoint. Returns (n_hashed, n_reused). Dirs/symlinks/errors carry
+/// no hash and are skipped. `row_ids[i]` is the entries.id for `entries[i]`.
+fn hash_update_phase(
+    db_path: &Path,
     root: &Path,
-    entries: Vec<RawEntry>,
+    entries: &[RawEntry],
+    row_ids: &[i64],
     do_full: bool,
     reuse: Option<&ReuseCache>,
-) -> Vec<HashedEntry> {
-    entries
-        .into_par_iter()
-        .map(|e| {
-            // Dirs / symlinks / errors: nothing to hash.
-            if e.is_dir || e.is_symlink || e.error.is_some() {
-                return HashedEntry { entry: e, partial: None, full: None, reused: false };
-            }
-            let size = e.size.unwrap_or(0);
-            let mut partial: Option<[u8; 16]> = None;
-            let mut full: Option<[u8; 32]> = None;
-            let mut reused = false;
+) -> Result<(usize, usize)> {
+    const CHUNK: usize = 20_000;
+    // Indices of the entries that actually need a hash (files only).
+    let file_idx: Vec<usize> = (0..entries.len())
+        .filter(|&i| {
+            let e = &entries[i];
+            !e.is_dir && !e.is_symlink && e.error.is_none()
+        })
+        .collect();
 
-            // 1) Try cache (matches on size + mtime within 1s — covers
-            //    HFS+ 1s precision vs APFS 1ns).
-            if let Some(cache) = reuse {
-                if let Some(c) = cache.get(&e.rel_path) {
-                    if c.size == size
-                        && (c.mtime - e.mtime.unwrap_or(0.0)).abs() < 1.0
-                    {
-                        partial = c.partial;
-                        full = c.full;
-                        reused = true;
+    let mut conn = db::open_db(db_path)?;
+    let mut n_hashed = 0usize;
+    let mut n_reused = 0usize;
+
+    for chunk in file_idx.chunks(CHUNK) {
+        // Compute this chunk's hashes in parallel.
+        let computed: Vec<(i64, Option<Vec<u8>>, Option<Vec<u8>>, bool)> = chunk
+            .par_iter()
+            .map(|&i| {
+                let e = &entries[i];
+                let size = e.size.unwrap_or(0);
+                let mut partial: Option<[u8; 16]> = None;
+                let mut full: Option<[u8; 32]> = None;
+                let mut reused = false;
+
+                // 1) reuse cache (size + mtime within 1s: HFS+ 1s vs APFS 1ns)
+                if let Some(cache) = reuse {
+                    if let Some(c) = cache.get(&e.rel_path) {
+                        if c.size == size
+                            && (c.mtime - e.mtime.unwrap_or(0.0)).abs() < 1.0
+                        {
+                            partial = c.partial;
+                            full = c.full;
+                            reused = true;
+                        }
                     }
                 }
-            }
-
-            // 2) Compute partial if missing.
-            if partial.is_none() {
                 let abs: PathBuf = if e.rel_path == "." {
                     root.to_path_buf()
                 } else {
                     root.join(&e.rel_path)
                 };
-                partial = hash::partial(&abs, size).ok();
-            }
+                if partial.is_none() {
+                    partial = hash::partial(&abs, size).ok();
+                }
+                if do_full && full.is_none() {
+                    full = hash::full(&abs).ok();
+                }
+                (row_ids[i], partial.map(|b| b.to_vec()),
+                 full.map(|b| b.to_vec()), reused)
+            })
+            .collect();
 
-            // 3) Compute full only if --full and not already there.
-            if do_full && full.is_none() {
-                let abs: PathBuf = if e.rel_path == "." {
-                    root.to_path_buf()
-                } else {
-                    root.join(&e.rel_path)
-                };
-                full = hash::full(&abs).ok();
+        // Write this chunk back in one committed transaction (a checkpoint).
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE entries SET partial_hash=?, full_hash=? WHERE id=?")?;
+            for (rid, partial, full, reused) in &computed {
+                if partial.is_some() {
+                    n_hashed += 1;
+                }
+                if *reused {
+                    n_reused += 1;
+                }
+                stmt.execute(params![partial, full, rid])?;
             }
-
-            HashedEntry { entry: e, partial, full, reused }
-        })
-        .collect()
+        }
+        tx.commit()?;
+    }
+    Ok((n_hashed, n_reused))
 }
 
-fn write_phase(
+/// Phase 2: insert the walked file tree with NULL hashes, committing in
+/// batches so the structure is durable before the slow hashing starts. Returns
+/// (row_ids aligned to `entries`, total_files, total_dirs, total_size).
+///
+/// Parent resolution and path interning survive batch boundaries via the in-RAM
+/// `parent_id_by_rel` / `path_id_cache`: a parent committed in an earlier batch
+/// still resolves for a child in a later one (its row_id is cached, and the row
+/// exists so an FK check passes). Entries are inserted parent-before-child (walk
+/// order), exactly as before, so the resulting rows are byte-identical to the
+/// single-transaction path once phase 3 fills the hashes.
+fn write_structure_phase(
     db_path: &Path,
     snap_id: i64,
-    hashed: Vec<HashedEntry>,
-) -> Result<(i64, i64, i64)> {
+    entries: &[RawEntry],
+) -> Result<(Vec<i64>, i64, i64, i64)> {
+    const BATCH: usize = 50_000;
     let mut conn = db::open_db(db_path)?;
-    let tx = conn.transaction()?;
     let mut parent_id_by_rel: HashMap<String, i64> = HashMap::new();
     let mut path_id_cache: HashMap<String, i64> = HashMap::new();
+    let mut row_ids: Vec<i64> = Vec::with_capacity(entries.len());
     let mut total_files: i64 = 0;
     let mut total_dirs: i64 = 0;
     let mut total_size: i64 = 0;
 
-    {
-        let mut stmt = tx.prepare(
-            r#"INSERT INTO entries (snapshot_id, rel_path, path_id, parent_id, is_dir, size, mtime, partial_hash, full_hash, is_symlink, error, inode, device) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"#,
-        )?;
+    let mut start = 0usize;
+    while start < entries.len() {
+        let end = (start + BATCH).min(entries.len());
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                r#"INSERT INTO entries (snapshot_id, rel_path, path_id, parent_id, is_dir, size, mtime, partial_hash, full_hash, is_symlink, error, inode, device) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"#,
+            )?;
+            for e in &entries[start..end] {
+                let path_id = db::intern_path(&tx, &e.rel_path, &mut path_id_cache)?;
+                let parent_id: Option<i64> = e.parent_rel.as_ref()
+                    .and_then(|p| parent_id_by_rel.get(p).copied());
+                let inode = e.inode.map(i64_wrap);
+                let device = e.device.map(i64_wrap);
+                let size = e.size.map(|s| s as i64);
+                let none: Option<Vec<u8>> = None;   // hashes filled in phase 3
 
-        for h in hashed.iter() {
-            let e = &h.entry;
-            let path_id = db::intern_path(&tx, &e.rel_path, &mut path_id_cache)?;
-            let parent_id: Option<i64> = e.parent_rel.as_ref()
-                .and_then(|p| parent_id_by_rel.get(p).copied());
-            let inode = e.inode.map(i64_wrap);
-            let device = e.device.map(i64_wrap);
-            let size = e.size.map(|s| s as i64);
-            let partial = h.partial.as_ref().map(|b| b.to_vec());
-            let full = h.full.as_ref().map(|b| b.to_vec());
-
-            stmt.execute(params![
-                snap_id, e.rel_path, path_id, parent_id, e.is_dir as i64,
-                size, e.mtime, partial, full,
-                e.is_symlink as i64, e.error, inode, device,
-            ])?;
-            let row_id = tx.last_insert_rowid();
-            if e.is_dir {
-                parent_id_by_rel.insert(e.rel_path.clone(), row_id);
-                if e.parent_rel.is_some() {
-                    total_dirs += 1; // count subdirs, not the root entry
+                stmt.execute(params![
+                    snap_id, e.rel_path, path_id, parent_id, e.is_dir as i64,
+                    size, e.mtime, none, none,
+                    e.is_symlink as i64, e.error, inode, device,
+                ])?;
+                let row_id = tx.last_insert_rowid();
+                row_ids.push(row_id);
+                if e.is_dir {
+                    parent_id_by_rel.insert(e.rel_path.clone(), row_id);
+                    if e.parent_rel.is_some() {
+                        total_dirs += 1; // count subdirs, not the root entry
+                    }
+                } else if !e.is_symlink && e.error.is_none() {
+                    total_files += 1;
+                    total_size += e.size.unwrap_or(0) as i64;
                 }
-            } else if !e.is_symlink && e.error.is_none() {
-                total_files += 1;
-                total_size += e.size.unwrap_or(0) as i64;
             }
         }
+        tx.commit()?;
+        start = end;
     }
 
-    tx.commit()?;
-    Ok((total_files, total_dirs, total_size))
+    Ok((row_ids, total_files, total_dirs, total_size))
 }
 
 /// Wrapper used by `dx refresh`.
