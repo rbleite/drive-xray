@@ -169,6 +169,77 @@ fn win_file_info(path: &std::path::Path) -> Option<(u64, u64)> {
 /// Walk `root` synchronously, applying our filters. Returns entries in
 /// top-down DFS order so the writer can resolve parent_id from a running
 /// `HashMap<rel_path, rowid>`.
+/// Minimal case-insensitive glob: '*' matches any run (including empty), every
+/// other byte is literal. Inputs are expected already lower-cased. Enough for
+/// folder-name patterns like `*cache*`, `Skype*`, `*Extras`.
+fn wildcard_match(pat: &[u8], s: &[u8]) -> bool {
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star, mut mark): (Option<usize>, usize) = (None, 0);
+    while ti < s.len() {
+        if pi < pat.len() && pat[pi] == b'*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if pi < pat.len() && pat[pi] == s[ti] {
+            pi += 1;
+            ti += 1;
+        } else if let Some(sp) = star {
+            pi = sp + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < pat.len() && pat[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pat.len()
+}
+
+/// User exclusions split by kind: a bare name matches that folder anywhere; a
+/// name with '*' is a glob matched at any depth (both case-insensitive); a path
+/// (contains '/') matches from the drive root, pruning its subtree.
+struct Exclusions {
+    names: HashSet<String>,   // lower-cased
+    globs: Vec<String>,       // lower-cased
+    paths: Vec<String>,       // as-is, root-relative
+}
+
+impl Exclusions {
+    fn new(raw: &[String]) -> Self {
+        let mut names = HashSet::new();
+        let mut globs = Vec::new();
+        let mut paths = Vec::new();
+        for e in raw {
+            if e.contains('/') {
+                paths.push(e.clone());
+            } else if e.contains('*') {
+                globs.push(e.to_lowercase());
+            } else {
+                names.insert(e.to_lowercase());
+            }
+        }
+        Exclusions { names, globs, paths }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.names.is_empty() && self.globs.is_empty() && self.paths.is_empty()
+    }
+
+    fn matches(&self, name: &str, rel: &str) -> bool {
+        let nl = name.to_lowercase();
+        if self.names.contains(&nl) {
+            return true;
+        }
+        if self.globs.iter().any(|g| wildcard_match(g.as_bytes(), nl.as_bytes())) {
+            return true;
+        }
+        self.paths.iter().any(|e| rel == e
+            || rel.starts_with(&format!("{}/", e)))
+    }
+}
+
 pub fn walk(root: &Path, one_fs: bool, skip_cloud: bool,
             exclude: &[String]) -> Result<WalkResult> {
     let root = root.canonicalize()?;
@@ -182,6 +253,8 @@ pub fn walk(root: &Path, one_fs: bool, skip_cloud: bool,
     let root_ino = meta_ino(&root_md);
     #[cfg(windows)]
     let root_dev: u64 = win_file_info(&root).map(|(s, _)| s).unwrap_or(0);
+
+    let exclusions = Exclusions::new(exclude);
 
     let mut entries: Vec<RawEntry> = Vec::new();
     let mut stats = WalkStats::default();
@@ -276,11 +349,9 @@ pub fn walk(root: &Path, one_fs: bool, skip_cloud: bool,
                 if SKIP_DIR_NAMES.contains(&name.as_str()) {
                     continue;
                 }
-                // User exclusions: prune a folder (by its rel_path) and its subtree.
-                if !exclude.is_empty()
-                    && exclude.iter().any(|e| rel == *e
-                        || rel.starts_with(&format!("{}/", e)))
-                {
+                // User exclusions: prune a folder (by name anywhere, glob, or
+                // root-relative path) and its whole subtree.
+                if !exclusions.is_empty() && exclusions.matches(&name, &rel) {
                     stats.excluded += 1;
                     continue;
                 }

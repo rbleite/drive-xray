@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import datetime
+import fnmatch
 import hashlib
 import json
 import os
@@ -1322,7 +1323,15 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
 
     cur = conn.cursor()
 
-    _exclusions = get_exclusions(db_path)   # user folder exclusions (rel prefixes)
+    # user folder exclusions, split by kind: a path (contains '/') matches from
+    # the drive root; a bare name matches that folder anywhere in the tree; a
+    # name with '*' is a glob matched against the folder name at any depth.
+    _exclusions = get_exclusions(db_path)
+    _excl_paths = [e for e in _exclusions if "/" in e]           # root-relative
+    _excl_names = {e.lower() for e in _exclusions                # name anywhere
+                   if "/" not in e and "*" not in e}
+    _excl_globs = [e.lower() for e in _exclusions               # glob anywhere
+                   if "/" not in e and "*" in e]
     excluded_skipped = 0
     root_dev = root.stat().st_dev if one_fs else None
     # Track visited directory (inode, device) pairs to detect APFS firmlinks.
@@ -1373,13 +1382,16 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=lambda e: None):
         # prune skip dirs in-place
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES]
-        # prune user-excluded folders (by drive-root-relative path)
+        # prune user-excluded folders: by name (anywhere), glob, or root-path
         if _exclusions:
             _dp0 = Path(dirpath)
             _kept = []
             for d in dirnames:
                 _rel = str((_dp0 / d).relative_to(root)).replace("\\", "/")
-                if any(_rel == e or _rel.startswith(e + "/") for e in _exclusions):
+                if (d.lower() in _excl_names
+                        or any(fnmatch.fnmatchcase(d.lower(), g) for g in _excl_globs)
+                        or any(_rel == e or _rel.startswith(e + "/")
+                               for e in _excl_paths)):
                     excluded_skipped += 1
                 else:
                     _kept.append(d)
