@@ -308,6 +308,9 @@ fn migrate_v4_noop_on_v4() {
 ///    same IEEE 754 bit pattern. CPython computes `st_mtime` as
 ///    `tv_sec + tv_nsec * 1e-9` in C; our Rust walker does the same in the
 ///    same order. If they ever drift, this test catches it.
+///    Unix-only: it exercises the tv_sec/tv_nsec formula via MetadataExt;
+///    on Windows st_mtime comes from a different (FILETIME) code path.
+#[cfg(unix)]
 #[test]
 fn mtime_storage_matches_cpython_formula() {
     use std::os::unix::fs::MetadataExt;
