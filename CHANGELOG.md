@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-07-15
+
 ### Fixed
 - Drives indexed on one OS are now recognized when mounted on another
   (e.g. indexed on macOS at `/Volumes/MyDisk`, plugged into Windows as
