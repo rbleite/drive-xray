@@ -78,7 +78,7 @@ jobs:
         run: |
           python3 -m venv .venv
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install streamlit openpyxl plotly
+          .venv/bin/pip install streamlit openpyxl plotly pyyaml
 
       - name: cargo test (parity only)
         working-directory: rust
