@@ -21,8 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (index path suggestion and backup target).
 
 ### Added
-- GitHub Actions: `tests` workflow runs `cargo test` on macos-13 (Intel)
-  and macos-14 (Apple Silicon) on every push and PR, plus a separate
+- GitHub Actions: `tests` workflow runs `cargo test` on macos-15-intel
+  (Intel; replaces the retired macos-13 image), macos-14 (Apple Silicon)
+  and windows-latest on every push and PR, plus a separate
   `parity` job that sets up a Python venv to run the cross-implementation
   parity tests.
 - GitHub Actions: `release` workflow auto-builds the universal binary
