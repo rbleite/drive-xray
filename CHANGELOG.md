@@ -41,6 +41,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (index path suggestion and backup target).
 
 ### Added
+- Persistent operation log + live status: index/refresh/snapshot output is
+  tee'd to `<drive>.db.log`, so closing the browser tab no longer loses the
+  log. The app shows the last progress line next to the ⏳ badge in the
+  sidebar and a reviewable "📜 Log da operação" panel on the drive page
+  (also while the drive is busy/locked). The `.log` sidecar is removed
+  together with the drive's `.db`.
+- Stale-engine warning: the sidebar now warns when the `dx` binary version
+  differs from the app version (an old `dx.exe` silently misses features
+  like exclusions, checkpointing and cross-OS mount resolution).
 - `setup_shortcuts.ps1` (Windows): creates Desktop + Start Menu launch
   shortcuts for drive-xray, optional launch-at-login (`-Startup`), and
   `-Remove` to undo. Auto-detects a sibling
