@@ -128,13 +128,17 @@ start.bat
 
 #### Desktop shortcuts / start at login (Windows)
 
-`setup_shortcuts.ps1` creates launch "buttons" so you never open a terminal:
+`setup_shortcuts.bat` creates launch "buttons" so you never open a terminal —
+double-click it, or run from a terminal:
 
-```powershell
-.\setup_shortcuts.ps1            # Desktop + Start Menu shortcuts
-.\setup_shortcuts.ps1 -Startup   # also start automatically at login
-.\setup_shortcuts.ps1 -Remove    # undo everything it created
+```bat
+setup_shortcuts.bat            # Desktop + Start Menu shortcuts
+setup_shortcuts.bat -Startup   # also start automatically at login
+setup_shortcuts.bat -Remove    # undo everything it created
 ```
+
+(The `.bat` wraps `setup_shortcuts.ps1` with `-ExecutionPolicy Bypass`, so it
+works on the default Windows script policy without changing system settings.)
 
 If [media-catalog](https://github.com/rbleite/media-catalog) is cloned next
 to this project (same parent folder), it gets its own shortcuts too — its
