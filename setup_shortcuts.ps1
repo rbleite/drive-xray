@@ -1,17 +1,23 @@
-# setup_shortcuts.ps1 — create launch "buttons" for drive-xray on Windows:
+﻿# setup_shortcuts.ps1 -- create launch "buttons" for drive-xray on Windows:
 # Desktop + Start Menu shortcuts, and (optionally) launch-at-login.
 # Also creates the same shortcuts for media-catalog when it is found.
 #
-# Usage (PowerShell, from the drive-xray folder):
+# Usage (PowerShell, from the drive-xray folder) -- or double-click
+# setup_shortcuts.bat, which wraps this with -ExecutionPolicy Bypass:
 #   .\setup_shortcuts.ps1                    # Desktop + Start Menu shortcuts
 #   .\setup_shortcuts.ps1 -Startup           # also start automatically at login
 #   .\setup_shortcuts.ps1 -MediaCatalog "C:\Users\you\tools\media-catalog"
 #   .\setup_shortcuts.ps1 -Remove            # remove every shortcut this script created
 #
 # If -MediaCatalog is not given, sibling folders named "media-catalog" /
-# "media_catalog" next to this project (and under the same parent) are tried.
-# A found app is launched via its own run.bat/start.bat when it has one;
-# otherwise as a Streamlit app on port 8502 (drive-xray keeps 8501).
+# "media_catalog" next to this project (under the same parent) are tried.
+# A found app is launched via its own start.bat/run.bat when it has one;
+# otherwise as a Streamlit app on port 8502 (drive-xray keeps 8501,
+# media-catalog's own run.bat uses 8503).
+#
+# NOTE: keep this file pure ASCII. Windows PowerShell 5.1 reads BOM-less
+# .ps1 files as ANSI, and mangled UTF-8 punctuation (curly quotes,
+# em-dashes) can terminate strings mid-line and break parsing.
 
 param(
     [switch]$Startup,
@@ -22,8 +28,8 @@ param(
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-$desktop   = [Environment]::GetFolderPath("Desktop")
-$startMenu = [Environment]::GetFolderPath("Programs")
+$desktop    = [Environment]::GetFolderPath("Desktop")
+$startMenu  = [Environment]::GetFolderPath("Programs")
 $startupDir = [Environment]::GetFolderPath("Startup")
 
 $shell = New-Object -ComObject WScript.Shell
@@ -35,7 +41,7 @@ function New-AppShortcut {
     $lnk.TargetPath = $TargetPath
     if ($Arguments) { $lnk.Arguments = $Arguments }
     $lnk.WorkingDirectory = $WorkDir
-    $lnk.WindowStyle = 7    # start minimized — the browser tab is the UI
+    $lnk.WindowStyle = 7    # start minimized -- the browser tab is the UI
     $ico = Join-Path $WorkDir "assets\icon.ico"
     if (Test-Path $ico) { $lnk.IconLocation = $ico }
     $lnk.Save()
@@ -80,7 +86,7 @@ $apps += @{ Name = "drive-xray"; Dir = $here; Port = 8501 }
 $mcDir = $null
 if ($MediaCatalog) {
     if (Test-Path $MediaCatalog) { $mcDir = (Resolve-Path $MediaCatalog).Path }
-    else { Write-Warning "media-catalog não encontrado em: $MediaCatalog" }
+    else { Write-Warning "media-catalog nao encontrado em: $MediaCatalog" }
 } else {
     $parent = Split-Path -Parent $here
     foreach ($cand in @("media-catalog", "media_catalog", "MediaCatalog")) {
@@ -91,7 +97,7 @@ if ($MediaCatalog) {
 if ($mcDir) {
     $apps += @{ Name = "media-catalog"; Dir = $mcDir; Port = 8502 }
 } elseif (-not $Remove) {
-    Write-Host "  (media-catalog não encontrado — usa -MediaCatalog <pasta> para o incluir)"
+    Write-Host "  (media-catalog nao encontrado -- usa '-MediaCatalog <pasta>' para o incluir)"
 }
 
 # ---- create / remove -------------------------------------------------------
@@ -104,10 +110,10 @@ foreach ($app in $apps) {
     }
     $spec = Get-LaunchSpec -Dir $app.Dir -Port $app.Port
     if (-not $spec) {
-        Write-Warning "$($app.Name): sem run.bat/start.bat/app.py em $($app.Dir) — ignorado"
+        Write-Warning "$($app.Name): sem start.bat/run.bat/app.py em $($app.Dir) -- ignorado"
         continue
     }
-    Write-Host "$($app.Name)  →  $($spec.Target) $($spec.Args)"
+    Write-Host "$($app.Name)  ->  $($spec.Target) $($spec.Args)"
     New-AppShortcut -Name $app.Name -TargetPath $spec.Target -Arguments $spec.Args `
                     -WorkDir $app.Dir -Folder $desktop
     New-AppShortcut -Name $app.Name -TargetPath $spec.Target -Arguments $spec.Args `
@@ -121,6 +127,8 @@ foreach ($app in $apps) {
 
 if (-not $Remove) {
     Write-Host ""
-    Write-Host "Feito. Atalhos no Ambiente de Trabalho e Menu Iniciar$(if ($Startup) { ' + arranque no login' })."
+    $extra = ""
+    if ($Startup) { $extra = " + arranque no login" }
+    Write-Host "Feito. Atalhos no Ambiente de Trabalho e Menu Iniciar$extra."
     Write-Host "Para desfazer:  .\setup_shortcuts.ps1 -Remove"
 }
