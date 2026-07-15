@@ -26,7 +26,7 @@ from drive_xray import (
     get_hash_version, HASH_VERSION, _duplicate_rows,
     compute_folder_sizes, generate_cleanup_script,
     CLEANUP_STRATEGIES, CLEANUP_ACTIONS,
-    latest_snapshot_id, list_snapshots, diff_snapshots,
+    latest_snapshot_id, list_snapshots, diff_snapshots, resolve_root,
     registry_list, registry_remove, registry_register,
     cross_dedupe, single_copy_files, cold_data, read_drive_index_opts,
     generate_backup_script,
@@ -873,6 +873,9 @@ def drive_info(db: Path) -> dict | str | None:
         n_snapshots = conn.execute(
             "SELECT COUNT(*) FROM snapshots"
         ).fetchone()[0]
+        # a drive indexed on another OS/machine mounts elsewhere (e.g.
+        # /Volumes/X on macOS → E:\ on Windows) — resolve to the live mount
+        resolved_root = str(resolve_root(conn, row[1])) if row and row[1] else None
         conn.close()
     except sqlite3.OperationalError as e:
         # "database is locked" during an in-progress index/refresh is transient,
@@ -888,6 +891,8 @@ def drive_info(db: Path) -> dict | str | None:
     d = dict(zip(
         ["label", "root", "indexed_at", "files", "dirs", "size"], row
     ))
+    if resolved_root:
+        d["root"] = resolved_root
     d["snapshot_id"] = sid
     d["n_snapshots"] = n_snapshots
     return d
@@ -1339,10 +1344,12 @@ with st.sidebar:
 
     # native folder picker — must live outside the form (forms allow only a
     # submit button), so it writes the path into session_state and reruns.
-    st.session_state.setdefault("idx_root_v", "/Volumes/")
+    _browse_default = ("/Volumes/" if sys.platform == "darwin"
+                       else "" if os.name == "nt" else "/media/")
+    st.session_state.setdefault("idx_root_v", _browse_default)
     _pk1, _pk2 = st.columns([1, 2])
     if _pk1.button(t("browse_btn"), key="pick_idx_btn", width="stretch"):
-        _picked = pick_folder_dialog(st.session_state.get("idx_root_v") or "/Volumes/")
+        _picked = pick_folder_dialog(st.session_state.get("idx_root_v") or _browse_default)
         if _picked:
             st.session_state["idx_root_v"] = _picked
             st.rerun()
@@ -2739,8 +2746,10 @@ with tab_compare:
                 st.markdown(f"**{t('bkp_title')}**")
                 st.caption(t("bkp_caption"))
                 _bt1, _bt2 = st.columns([3, 1])
+                _bkp_default = ("/Volumes/" if sys.platform == "darwin"
+                                else "" if os.name == "nt" else "/media/")
                 _bkp_target = _bt1.text_input(t("bkp_target"),
-                                              value="/Volumes/", key="bkp_target")
+                                              value=_bkp_default, key="bkp_target")
                 _bkp_shell = _bt2.selectbox(t("bkp_shell"),
                                             ["rsync (.sh)", "robocopy (.bat)"],
                                             key="bkp_shell")

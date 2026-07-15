@@ -453,7 +453,8 @@ fn read_drive_and_cache(
             [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .map_err(|_| anyhow!("db has no drive record — run `index` first"))?;
-    let root = PathBuf::from(&drv.0);
+    // the drive may be mounted somewhere else now (other machine / other OS)
+    let root = db::resolve_root(&conn, &drv.0);
     if !root.is_dir() {
         anyhow::bail!("root {} not mounted or not a directory", root.display());
     }

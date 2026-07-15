@@ -78,17 +78,18 @@ pub fn generate(
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
+    // the drive may be mounted somewhere else now (other machine / other OS)
+    let root = db::resolve_root(&conn, &drv.1);
     drop(conn);
 
     // Best-effort warmup if the drive is mounted — matches Python behavior.
-    let root = std::path::PathBuf::from(&drv.1);
     if root.is_dir() {
         dedupe::fill_full_hashes(db_path, &root, min_size, None)?;
     }
 
     let rows = duplicate_rows(db_path, min_size, None)?;
     let label = drv.0.unwrap_or_default();
-    let root_path = drv.1;
+    let root_path = root.to_string_lossy().to_string();
     let stamp = Local::now().format("%Y%m%dT%H%M%S").to_string();
     let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
 

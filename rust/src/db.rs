@@ -9,7 +9,7 @@ use blake2b_simd::Params as Blake2bParams;
 use chrono::Local;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Schema v4 — must match `SCHEMA` constant in `drive_xray.py`.
 /// Schema v5 ("Tier 3" — path interning). Adds a `paths` table that holds
@@ -625,4 +625,169 @@ pub fn get_hash_version(conn: &Connection) -> Result<i64> {
         .query_row("SELECT hash_version FROM drive LIMIT 1", [], |r| r.get(0))
         .ok().flatten();
     Ok(v.unwrap_or(1))
+}
+
+// ---------- cross-platform root resolution ----------
+// Port of `resolve_root` in drive_xray.py — see the comment block there.
+// `drive.root_path` is recorded as it was at index time ("/Volumes/MyDisk"
+// on macOS, "E:\" on Windows); the same disk on another machine/OS mounts
+// somewhere else. A candidate mount point is accepted only when the
+// top-level entries of the latest snapshot actually exist under it.
+
+#[cfg(windows)]
+fn mount_candidates() -> Vec<PathBuf> {
+    (b'A'..=b'Z')
+        .map(|c| PathBuf::from(format!("{}:\\", c as char)))
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn mount_candidates() -> Vec<PathBuf> {
+    let mut cands = Vec::new();
+    for base in ["/Volumes", "/media", "/run/media", "/mnt"] {
+        let children: Vec<PathBuf> = match std::fs::read_dir(base) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.is_dir())
+                .collect(),
+            Err(_) => continue,
+        };
+        // modern layout adds a per-user level: /media/<user>/<volume>
+        if base == "/media" || base == "/run/media" {
+            for c in &children {
+                if let Ok(rd) = std::fs::read_dir(c) {
+                    cands.extend(
+                        rd.filter_map(|e| e.ok().map(|e| e.path()))
+                            .filter(|p| p.is_dir()),
+                    );
+                }
+            }
+        }
+        cands.extend(children);
+    }
+    cands
+}
+
+/// Possible path parts below the volume mount point when the indexed root
+/// was a folder INSIDE the volume (e.g. "/Volumes/X/Backups" → "Backups").
+pub fn stored_subpaths(stored_root: &str) -> Vec<String> {
+    let s = stored_root.replace('\\', "/");
+    let s = s.trim_end_matches('/');
+    let bytes = s.as_bytes();
+    if bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/'
+        && (bytes[0] as char).is_ascii_alphabetic()
+    {
+        return if s.len() > 3 { vec![s[3..].to_string()] } else { vec![] };
+    }
+    let mut subs = Vec::new();
+    for (base, depth) in [("/Volumes/", 1usize), ("/mnt/", 1),
+                          ("/media/", 1), ("/run/media/", 2)] {
+        if let Some(rest) = s.strip_prefix(base) {
+            let parts: Vec<&str> = rest.split('/').collect();
+            // `depth` components name the volume; /media is ambiguous (with
+            // or without the per-user level) so both splits are tried — the
+            // fingerprint check picks the right one.
+            let depths: &[usize] = if base == "/media/" { &[1, 2] } else { std::slice::from_ref(&depth) };
+            for &d in depths {
+                if parts.len() > d {
+                    subs.push(parts[d..].join("/"));
+                }
+            }
+        }
+    }
+    subs
+}
+
+/// Top-level names from the latest snapshot (dirs first, largest first) —
+/// used to recognize the volume's content under a different mount point.
+fn root_fingerprint(conn: &Connection) -> Vec<String> {
+    let sid = match latest_snapshot_id(conn) {
+        Ok(Some(sid)) => sid,
+        _ => return Vec::new(),
+    };
+    let mut stmt = match conn.prepare(
+        "SELECT rel_path FROM entries
+          WHERE snapshot_id=? AND rel_path NOT LIKE '%/%' AND rel_path <> '.'
+          ORDER BY is_dir DESC, size DESC LIMIT 12",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    stmt.query_map([sid], |r| r.get::<_, String>(0))
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+}
+
+/// Map a stored root_path to wherever that volume is mounted right now.
+/// Returns the stored path unchanged when it still exists or when no mounted
+/// volume matches the snapshot fingerprint. A candidate wins when at least
+/// half of the sampled top-level entries exist under it; ties prefer more
+/// hits, then a matching directory name. Must stay behaviourally identical
+/// to `resolve_root` in drive_xray.py.
+pub fn resolve_root(conn: &Connection, stored_root: &str) -> PathBuf {
+    resolve_root_with(conn, stored_root, None)
+}
+
+pub fn resolve_root_with(
+    conn: &Connection,
+    stored_root: &str,
+    candidates: Option<Vec<PathBuf>>,
+) -> PathBuf {
+    let root = PathBuf::from(stored_root);
+    if root.is_dir() {
+        return root;
+    }
+    let names = root_fingerprint(conn);
+    if names.is_empty() {
+        return root;
+    }
+    let need = std::cmp::max(1, (names.len() + 1) / 2);
+    let subs = stored_subpaths(stored_root);
+    let stored_name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let mut best: Option<((usize, bool), PathBuf)> = None;
+    for cand in candidates.unwrap_or_else(mount_candidates) {
+        let mut bases = vec![cand.clone()];
+        bases.extend(subs.iter().map(|s| cand.join(s)));
+        for base in bases {
+            if !base.is_dir() {
+                continue;
+            }
+            let hits = names.iter().filter(|n| base.join(n).exists()).count();
+            if hits < need {
+                continue;
+            }
+            let name_match = base
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase() == stored_name)
+                .unwrap_or(false);
+            let key = (hits, name_match);
+            if best.as_ref().map(|(k, _)| key > *k).unwrap_or(true) {
+                best = Some((key, base));
+            }
+        }
+    }
+    best.map(|(_, p)| p).unwrap_or(root)
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    #[test]
+    fn subpaths_windows_and_posix() {
+        assert_eq!(stored_subpaths("/Volumes/X"), Vec::<String>::new());
+        assert_eq!(stored_subpaths("/Volumes/X/Backups/2020"),
+                   vec!["Backups/2020".to_string()]);
+        assert_eq!(stored_subpaths("E:\\Backups"), vec!["Backups".to_string()]);
+        assert_eq!(stored_subpaths("E:\\"), Vec::<String>::new());
+        assert_eq!(stored_subpaths("/media/rleite/X/sub"),
+                   vec!["X/sub".to_string(), "sub".to_string()]);
+        assert_eq!(stored_subpaths("/run/media/rleite/X/sub"),
+                   vec!["sub".to_string()]);
+        assert_eq!(stored_subpaths("/Users/rleite"), Vec::<String>::new());
+    }
 }

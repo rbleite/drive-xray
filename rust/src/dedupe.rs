@@ -357,9 +357,9 @@ pub fn dedupe(db_path: &Path, min_size: i64) -> Result<()> {
     )?;
     let sid = db::latest_snapshot_id(&conn)?
         .ok_or_else(|| anyhow::anyhow!("no snapshots — run `index` first"))?;
+    let root = db::resolve_root(&conn, &drv.0);
     drop(conn);
 
-    let root = std::path::PathBuf::from(&drv.0);
     if root.is_dir() {
         fill_full_hashes(db_path, &root, min_size, Some(sid))?;
     } else {

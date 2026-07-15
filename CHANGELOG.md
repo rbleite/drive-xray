@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Drives indexed on one OS are now recognized when mounted on another
+  (e.g. indexed on macOS at `/Volumes/MyDisk`, plugged into Windows as
+  `E:\` or into Linux as `/media/<user>/MyDisk`). Both engines resolve
+  the stored `root_path` to the volume's current mount point by matching
+  the snapshot's top-level entries against mounted volumes (content
+  fingerprint — no reliance on volume labels). Applies to refresh,
+  snapshot, dedupe, export, cleanup/backup scripts, verify-integrity and
+  the UI's mounted-drive checks (`resolve_root` in `drive_xray.py`,
+  `db::resolve_root` in Rust).
+- UI defaults that assumed macOS (`/Volumes/`) are now platform-aware
+  (index path suggestion and backup target).
+
 ### Added
 - GitHub Actions: `tests` workflow runs `cargo test` on macos-13 (Intel)
   and macos-14 (Apple Silicon) on every push and PR, plus a separate

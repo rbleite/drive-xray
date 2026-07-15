@@ -360,6 +360,20 @@ Podes consultar diretamente com `sqlite3 backup-2024.db`.
 - O log mostra `[pruned N cross-fs subtrees]` no fim quando usaste `-x`,
   para confirmares que algum corte aconteceu.
 
+## Usar a mesma drive em vários sistemas (macOS ↔ Windows ↔ Linux)
+
+O `root_path` fica gravado na `.db` tal como estava na altura da indexação
+(`/Volumes/MeuDisco` no macOS, `E:\` no Windows, `/media/<user>/MeuDisco`
+no Linux). Quando o caminho gravado já não existe, o dx procura o volume
+nos mount points da plataforma actual e aceita um candidato quando as
+entradas de topo do último snapshot existem lá de facto (impressão digital
+por conteúdo — não depende do nome/label do volume, que o exFAT põe em
+maiúsculas e o Windows nem sequer expõe no caminho). Isto aplica-se a
+`refresh`, `snapshot`, `dedupe`, `export`, scripts de cleanup/backup,
+verificação de integridade e aos avisos de "drive não montada" na UI.
+Se o volume não for encontrado em lado nenhum, o comportamento é o de
+sempre: a drive é tratada como não montada.
+
 ## Limitações conhecidas
 
 - **APFS clones** (cópias copy-on-write, `cp -c`): aparecem como ficheiros
