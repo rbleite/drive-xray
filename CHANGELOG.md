@@ -41,6 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (index path suggestion and backup target).
 
 ### Added
+- `setup_shortcuts.ps1` (Windows): creates Desktop + Start Menu launch
+  shortcuts for drive-xray, optional launch-at-login (`-Startup`), and
+  `-Remove` to undo. Auto-detects a sibling
+  [media-catalog](https://github.com/rbleite/media-catalog) checkout and
+  creates its shortcuts too (its `run.bat` uses port 8503, so both apps
+  can run simultaneously).
 - CI: `pytest` job on ubuntu-latest and windows-latest running the
   Python test suite (previously only `cargo test` + parity ran in CI).
 

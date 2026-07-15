@@ -126,6 +126,25 @@ start.bat
 > `dx.exe` into the project folder, and the UI switches to `engine: 🦀 Rust`
 > automatically — the `.db` files are byte-identical either way.
 
+#### Desktop shortcuts / start at login (Windows)
+
+`setup_shortcuts.ps1` creates launch "buttons" so you never open a terminal:
+
+```powershell
+.\setup_shortcuts.ps1            # Desktop + Start Menu shortcuts
+.\setup_shortcuts.ps1 -Startup   # also start automatically at login
+.\setup_shortcuts.ps1 -Remove    # undo everything it created
+```
+
+If [media-catalog](https://github.com/rbleite/media-catalog) is cloned next
+to this project (same parent folder), it gets its own shortcuts too — its
+`run.bat` serves on port 8503, so both apps can run at the same time. Use
+`-MediaCatalog "C:\path\to\media-catalog"` when it lives elsewhere.
+
+(On macOS the equivalent is `./build_app.sh`, which builds a double-click
+`~/Applications/drive-xray.app` — add it to **System Settings → Login Items**
+to start it at login. media-catalog ships its own `build_app.sh` as well.)
+
 ### Multi-machine sync (OneDrive / Google Drive / Dropbox)
 
 Store all `.db` index files in a shared cloud folder so every machine
