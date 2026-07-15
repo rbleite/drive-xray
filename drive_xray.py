@@ -45,7 +45,7 @@ READ_CHUNK = 1024 * 1024
 # v1 = head + tail; v2 = head + middle + tail (defends against bio formats like
 # BAM/VCF where header/footer are stable but body varies).
 HASH_VERSION = 2
-DX_VERSION = "1.3.0"
+DX_VERSION = "1.4.0"
 SCHEMA_VERSION = 6  # see _migrate_to_v6 / SCHEMA constant below
 SKIP_DIR_NAMES = {
     ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems",
@@ -1158,6 +1158,32 @@ def _migrate_to_v6(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def _migrate_windows_seps(conn: sqlite3.Connection) -> None:
+    """Older Python-on-Windows indexes stored rel_path with '\\' while the
+    Rust engine (and current Python) always store '/'. Normalize in place —
+    but ONLY when the drive root is a Windows path (X:\\...), where '\\'
+    cannot legally be part of a filename. On POSIX roots a backslash may be
+    a real character in a name, so those are left untouched."""
+    row = conn.execute("SELECT root_path FROM drive LIMIT 1").fetchone()
+    r = row[0] if row and row[0] else ""
+    if not (len(r) >= 2 and r[1] == ":" and r[0].isalpha()):
+        return
+    n = conn.execute(
+        "SELECT COUNT(*) FROM entries WHERE rel_path LIKE '%\\%'"
+    ).fetchone()[0]
+    if not n:
+        return
+    conn.execute("UPDATE entries SET rel_path = REPLACE(rel_path, '\\', '/')"
+                 " WHERE rel_path LIKE '%\\%'")
+    conn.execute("UPDATE OR IGNORE folder_meta"
+                 " SET rel_path = REPLACE(rel_path, '\\', '/')"
+                 " WHERE rel_path LIKE '%\\%'")
+    conn.execute("UPDATE OR IGNORE exclusions"
+                 " SET rel_path = REPLACE(rel_path, '\\', '/')"
+                 " WHERE rel_path LIKE '%\\%'")
+    conn.commit()
+
+
 def open_db(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     # Existing tables may be v1/v2/v3/v4/v5; migrate forward in sequence.
@@ -1166,6 +1192,7 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     _migrate_to_v5(conn)
     _migrate_to_v6(conn)
     conn.executescript(SCHEMA)
+    _migrate_windows_seps(conn)
     # in case `drive` was created without these (very old .db)
     drv_cols = {r[1] for r in conn.execute("PRAGMA table_info(drive)")}
     for col in ("hash_version", "opt_one_fs", "opt_skip_cloud"):
@@ -1241,6 +1268,182 @@ def list_snapshots(conn: sqlite3.Connection) -> list[dict]:
     return [dict(zip(cols, r)) for r in conn.execute(
         f"SELECT {','.join(cols)} FROM snapshots ORDER BY id DESC"
     )]
+
+
+# ---------- cross-platform root resolution ----------
+#
+# `drive.root_path` is stored as it was at index time: "/Volumes/MyDisk" on
+# macOS, "E:\\" on Windows, "/media/<user>/MyDisk" on Linux. The same physical
+# disk plugged into another machine (or OS) mounts somewhere else, so a
+# literal Path(root_path).is_dir() would report a perfectly good drive as
+# "not mounted". resolve_root() finds where the volume lives NOW: it scans
+# the platform's mount points and accepts a candidate only when the top-level
+# entries recorded in the latest snapshot actually exist under it (a content
+# fingerprint — volume labels are not trusted: exFAT uppercases them, users
+# rename them, and Windows drive letters carry no name at all).
+
+_POSIX_MOUNT_BASES = ("/Volumes", "/media", "/run/media", "/mnt")
+
+
+def _mount_candidates() -> list[Path]:
+    """Every mount point where an external volume can appear on this OS."""
+    cands: list[Path] = []
+    if os.name == "nt":
+        for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            p = Path(f"{letter}:\\")
+            try:
+                if p.is_dir():
+                    cands.append(p)
+            except OSError:
+                pass
+        return cands
+    for base in _POSIX_MOUNT_BASES:
+        b = Path(base)
+        try:
+            children = [c for c in b.iterdir() if c.is_dir()]
+        except OSError:
+            continue
+        cands.extend(children)
+        if base in ("/media", "/run/media"):
+            # modern layout adds a per-user level: /media/<user>/<volume>
+            for c in children:
+                try:
+                    cands.extend(x for x in c.iterdir() if x.is_dir())
+                except OSError:
+                    pass
+    return cands
+
+
+def _stored_subpaths(stored_root: str) -> list[str]:
+    """If the indexed root was a folder INSIDE the volume (e.g.
+    "/Volumes/X/Backups" or "E:\\Backups"), return the possible parts below
+    the mount point ("Backups") so they can be re-applied under the new
+    mount. Empty list when the root was the volume itself or the mount
+    layout isn't recognized."""
+    s = stored_root.replace("\\", "/").rstrip("/")
+    if len(s) >= 3 and s[1:3] == ":/" and s[0].isalpha():
+        return [s[3:]] if len(s) > 3 else []
+    subs: list[str] = []
+    for base, depth in (("/Volumes/", 1), ("/mnt/", 1),
+                        ("/media/", 1), ("/run/media/", 2)):
+        if not s.startswith(base):
+            continue
+        parts = s[len(base):].split("/")
+        # `depth` path components name the volume; the rest is the subpath.
+        # /media is ambiguous (with or without the per-user level) so both
+        # interpretations are tried — the fingerprint check picks the right one.
+        depths = (1, 2) if base == "/media/" else (depth,)
+        for d in depths:
+            if len(parts) > d:
+                subs.append("/".join(parts[d:]))
+    return subs
+
+
+def _root_fingerprint(conn: sqlite3.Connection, k_names: int = 12,
+                      k_files: int = 8) -> tuple[list[str], list[tuple[str, int]]]:
+    """(top_level_names, file_samples) from the latest snapshot, used to
+    recognize the volume's content under a different mount point.
+    top_level_names: names directly under the root (dirs first, largest
+    first). file_samples: (rel_path, size) of the largest regular files —
+    an exact rel_path + byte-size match is a far stronger signal than a
+    name, so generic folder names ("Photos", "Backup") can't cause a
+    false positive on their own."""
+    sid = latest_snapshot_id(conn)
+    if sid is None:
+        return [], []
+    names = [r[0] for r in conn.execute(
+        "SELECT rel_path FROM entries"
+        " WHERE snapshot_id=? AND rel_path NOT LIKE '%/%'"
+        "   AND rel_path NOT LIKE '%\\%' AND rel_path <> '.'"
+        " ORDER BY is_dir DESC, size DESC LIMIT ?", (sid, k_names))]
+    files = [(r[0].replace("\\", "/"), r[1]) for r in conn.execute(
+        "SELECT rel_path, size FROM entries"
+        " WHERE snapshot_id=? AND is_dir=0 AND is_symlink=0"
+        "   AND error IS NULL AND size > 0"
+        " ORDER BY size DESC LIMIT ?", (sid, k_files))]
+    return names, files
+
+
+def _score_base(base: Path, names: list[str],
+                files: list[tuple[str, int]]) -> tuple[int, int]:
+    """(name_hits, file_hits) for a candidate mount point. A file only
+    counts when it exists at the sampled rel_path with the exact size."""
+    name_hits = 0
+    for n in names:
+        try:
+            if (base / n).exists():
+                name_hits += 1
+        except OSError:
+            pass
+    file_hits = 0
+    for rp, sz in files:
+        try:
+            if (base / rp).stat().st_size == sz:
+                file_hits += 1
+        except OSError:
+            pass
+    return name_hits, file_hits
+
+
+def _fingerprint_passes(name_hits: int, file_hits: int,
+                        names: list[str], files: list[tuple[str, int]]) -> bool:
+    """Acceptance rule: a majority of top-level names (min 2 when there are
+    2+), AND at least one exact rel_path+size file match whenever the
+    snapshot has files to sample. Conservative on purpose — a wrong match
+    feeds verify/dedupe/cleanup, so 'not found' must beat 'maybe'."""
+    if not names and not files:
+        return False
+    if names:
+        need = 1 if len(names) == 1 else max(2, (len(names) + 1) // 2)
+        if name_hits < need:
+            return False
+    if files and file_hits < 1:
+        return False
+    return (name_hits + file_hits) > 0
+
+
+def resolve_root(conn: sqlite3.Connection, stored_root,
+                 candidates: list[Path] | None = None) -> Path:
+    """Map a stored root_path to wherever that volume is mounted right now.
+
+    The stored path is preferred when it exists and its content matches the
+    snapshot fingerprint (same machine, same mount). If it exists but does
+    NOT match (e.g. a different disk now occupies E:\\ or /Volumes/Name),
+    the scan below may find the real volume elsewhere; with no confident
+    match anywhere, the stored path is returned unchanged — behaviour then
+    degrades to exactly what it was before this feature existed.
+    `candidates` overrides the scanned mount points (used by tests)."""
+    root = Path(stored_root)
+    names, files = _root_fingerprint(conn)
+    try:
+        root_exists = root.is_dir()
+    except OSError:
+        root_exists = False
+    if root_exists:
+        if not names and not files:
+            return root          # nothing to compare against — trust it
+        nh, fh = _score_base(root, names, files)
+        if _fingerprint_passes(nh, fh, names, files):
+            return root
+    if not names and not files:
+        return root
+    subs = _stored_subpaths(str(stored_root))
+    stored_name = root.name.lower()
+    best: tuple[tuple[int, bool], Path] | None = None
+    for cand in (candidates if candidates is not None else _mount_candidates()):
+        for base in [cand, *(cand / s for s in subs)]:
+            try:
+                if not base.is_dir():
+                    continue
+            except OSError:
+                continue
+            nh, fh = _score_base(base, names, files)
+            if not _fingerprint_passes(nh, fh, names, files):
+                continue
+            key = (nh + fh, base.name.lower() == stored_name)
+            if best is None or key > best[0]:
+                best = (key, base)
+    return best[1] if best else root
 
 
 def insert_snapshot(conn: sqlite3.Connection, label: str | None,
@@ -1433,12 +1636,20 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
                 except OSError:
                     kept2.append(d)
             dirnames[:] = kept2
-        rel_dir = str(dp.relative_to(root)) if dp != root else "."
+        # rel paths are ALWAYS stored with '/' — the .db must be portable
+        # across OSes and byte-identical to the Rust engine's output. Only
+        # Windows needs the fix-up ('\' is the separator there); on POSIX a
+        # '\' is a legal filename character and must be left alone.
+        def _rel(p: Path) -> str:
+            s = str(p.relative_to(root))
+            return s.replace("\\", "/") if os.name == "nt" else s
+
+        rel_dir = _rel(dp) if dp != root else "."
         parent_id = parent_id_by_rel.get(rel_dir)
 
         for d in dirnames:
             full_p = dp / d
-            rel = str(full_p.relative_to(root))
+            rel = _rel(full_p)
             try:
                 st = full_p.lstat()
                 # Path.is_symlink() detects NTFS junctions on Windows;
@@ -1455,7 +1666,7 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
 
         for fn in filenames:
             full_p = dp / fn
-            rel = str(full_p.relative_to(root))
+            rel = _rel(full_p)
             try:
                 st = full_p.lstat()
             except OSError as e:
@@ -1673,7 +1884,7 @@ def dedupe(db_path: Path, min_size: int, mode: str,
     drive = conn.execute("SELECT root_path, label FROM drive LIMIT 1").fetchone()
     if not drive:
         sys.exit("db has no drive record — re-run `index` first")
-    root = Path(drive[0])
+    root = resolve_root(conn, drive[0])
     sid = latest_snapshot_id(conn)
     if sid is None:
         sys.exit("no snapshots — run `index` first")
@@ -1758,7 +1969,7 @@ def _read_drive_and_cache(db_path: Path) -> tuple[Path, str, bool, bool, dict, i
     if not drv:
         sys.exit("db has no drive record — run `index` first")
     root_path, label, opt_one_fs, opt_skip_cloud = drv
-    root = Path(root_path)
+    root = resolve_root(conn, root_path)
     if not root.is_dir():
         sys.exit(f"root {root} not mounted or not a directory")
     # Default one_fs=True on macOS/Linux (meaningful); False on Windows where
@@ -2040,7 +2251,7 @@ def export_duplicates(db_path: Path, out_path: Path, fmt: str,
     conn = open_db(db_path)
     drv = conn.execute("SELECT root_path FROM drive LIMIT 1").fetchone()
     if drv:
-        root = Path(drv[0])
+        root = resolve_root(conn, drv[0])
         if root.is_dir():
             fill_full_hashes(conn, root, min_size, workers=workers)
         else:
@@ -2154,6 +2365,7 @@ def generate_cleanup_script(db_path: Path, min_size: int,
     if not drv:
         sys.exit("db has no drive record")
     label, root_path = drv
+    root_path = str(resolve_root(conn, root_path))
     sid = latest_snapshot_id(conn)
     if sid is None:
         sys.exit("no snapshots")
@@ -2750,9 +2962,9 @@ def generate_backup_script(result: dict, db_labels: list, target_dir: str,
         try:
             conn = open_db(db)
             row = conn.execute("SELECT root_path FROM drive LIMIT 1").fetchone()
-            conn.close()
             if row and row[0]:
-                roots[label] = row[0]
+                roots[label] = str(resolve_root(conn, row[0]))
+            conn.close()
         except Exception:
             pass
     by_drive: dict[str, list[str]] = defaultdict(list)
@@ -2816,7 +3028,7 @@ def verify_integrity(db_path: Path, full: bool = False, progress=None) -> dict:
     """
     conn = open_db(db_path)
     row = conn.execute("SELECT root_path FROM drive LIMIT 1").fetchone()
-    root = Path(row[0]) if row and row[0] else None
+    root = resolve_root(conn, row[0]) if row and row[0] else None
     sid = latest_snapshot_id(conn)
     res = {"root_mounted": bool(root and root.is_dir()), "total": 0, "ok": 0,
            "corrupted": [], "size_changed": 0, "missing": 0, "unreadable": 0,

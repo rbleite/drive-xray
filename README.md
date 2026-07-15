@@ -126,6 +126,29 @@ start.bat
 > `dx.exe` into the project folder, and the UI switches to `engine: 🦀 Rust`
 > automatically — the `.db` files are byte-identical either way.
 
+#### Desktop shortcuts / start at login (Windows)
+
+`setup_shortcuts.bat` creates launch "buttons" so you never open a terminal —
+double-click it, or run from a terminal:
+
+```bat
+setup_shortcuts.bat            # Desktop + Start Menu shortcuts
+setup_shortcuts.bat -Startup   # also start automatically at login
+setup_shortcuts.bat -Remove    # undo everything it created
+```
+
+(The `.bat` wraps `setup_shortcuts.ps1` with `-ExecutionPolicy Bypass`, so it
+works on the default Windows script policy without changing system settings.)
+
+If [media-catalog](https://github.com/rbleite/media-catalog) is cloned next
+to this project (same parent folder), it gets its own shortcuts too — its
+`run.bat` serves on port 8503, so both apps can run at the same time. Use
+`-MediaCatalog "C:\path\to\media-catalog"` when it lives elsewhere.
+
+(On macOS the equivalent is `./build_app.sh`, which builds a double-click
+`~/Applications/drive-xray.app` — add it to **System Settings → Login Items**
+to start it at login. media-catalog ships its own `build_app.sh` as well.)
+
 ### Multi-machine sync (OneDrive / Google Drive / Dropbox)
 
 Store all `.db` index files in a shared cloud folder so every machine
@@ -135,6 +158,13 @@ sees every drive — even offline.
 2. Set the folder to your local OneDrive/GDrive path (e.g. `C:\Users\you\OneDrive`)
 3. Click **Import .db files from this folder** to pick up indexes synced from other machines
 4. New indexes created on this machine go there automatically
+
+Mount points are resolved automatically across machines and operating
+systems: a drive indexed on macOS at `/Volumes/MyDisk` is recognized when
+plugged into Windows (`E:\`) or Linux (`/media/<user>/MyDisk`) — the app
+matches the drive's actual content (its top-level entries) against the
+mounted volumes, so verify, refresh, dedupe and delete keep working
+wherever the disk shows up.
 
 ### Optional Rust engine (~10× faster on large drives)
 

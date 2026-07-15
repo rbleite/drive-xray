@@ -22,9 +22,9 @@ pub fn export(db_path: &Path, out: &Path, format: &str, min_size: i64) -> Result
     let drv: Option<(String,)> = conn
         .query_row("SELECT root_path FROM drive LIMIT 1", [], |r| Ok((r.get(0)?,)))
         .ok();
+    let resolved = drv.as_ref().map(|(r,)| db::resolve_root(&conn, r));
     drop(conn);
-    if let Some((root,)) = drv {
-        let root = std::path::PathBuf::from(&root);
+    if let Some(root) = resolved {
         if root.is_dir() {
             dedupe::fill_full_hashes(db_path, &root, min_size, None)?;
         } else {

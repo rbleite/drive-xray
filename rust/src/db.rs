@@ -9,7 +9,7 @@ use blake2b_simd::Params as Blake2bParams;
 use chrono::Local;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Schema v4 — must match `SCHEMA` constant in `drive_xray.py`.
 /// Schema v5 ("Tier 3" — path interning). Adds a `paths` table that holds
@@ -103,6 +103,8 @@ pub fn open_db(path: &Path) -> Result<Connection> {
 
     // Apply the fresh-db schema (CREATE TABLE / INDEX IF NOT EXISTS).
     conn.execute_batch(SCHEMA_V5)?;
+
+    migrate_windows_seps(&conn)?;
 
     // Backfill `drive` columns that may be missing on very old .db files.
     let drv_cols: HashSet<String> = column_names(&conn, "drive")?;
@@ -625,4 +627,267 @@ pub fn get_hash_version(conn: &Connection) -> Result<i64> {
         .query_row("SELECT hash_version FROM drive LIMIT 1", [], |r| r.get(0))
         .ok().flatten();
     Ok(v.unwrap_or(1))
+}
+
+/// Older Python-on-Windows indexes stored rel_path with '\' while the Rust
+/// engine (and current Python) always store '/'. Normalize in place — but
+/// ONLY when the drive root is a Windows path (X:\...), where '\' cannot
+/// legally be part of a filename. Mirrors `_migrate_windows_seps` in
+/// drive_xray.py.
+fn migrate_windows_seps(conn: &Connection) -> Result<()> {
+    let root: String = conn
+        .query_row("SELECT root_path FROM drive LIMIT 1", [], |r| r.get(0))
+        .unwrap_or_default();
+    let b = root.as_bytes();
+    if !(b.len() >= 2 && b[1] == b':' && (b[0] as char).is_ascii_alphabetic()) {
+        return Ok(());
+    }
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM entries WHERE rel_path LIKE '%\\%'",
+        [], |r| r.get(0),
+    )?;
+    if n == 0 {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE entries SET rel_path = REPLACE(rel_path, '\\', '/')
+          WHERE rel_path LIKE '%\\%'", [])?;
+    conn.execute(
+        "UPDATE OR IGNORE folder_meta SET rel_path = REPLACE(rel_path, '\\', '/')
+          WHERE rel_path LIKE '%\\%'", [])?;
+    conn.execute(
+        "UPDATE OR IGNORE exclusions SET rel_path = REPLACE(rel_path, '\\', '/')
+          WHERE rel_path LIKE '%\\%'", [])?;
+    Ok(())
+}
+
+// ---------- cross-platform root resolution ----------
+// Port of `resolve_root` in drive_xray.py — see the comment block there.
+// `drive.root_path` is recorded as it was at index time ("/Volumes/MyDisk"
+// on macOS, "E:\" on Windows); the same disk on another machine/OS mounts
+// somewhere else. A candidate mount point is accepted only when the
+// top-level entries of the latest snapshot actually exist under it.
+
+#[cfg(windows)]
+fn mount_candidates() -> Vec<PathBuf> {
+    (b'A'..=b'Z')
+        .map(|c| PathBuf::from(format!("{}:\\", c as char)))
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn mount_candidates() -> Vec<PathBuf> {
+    let mut cands = Vec::new();
+    for base in ["/Volumes", "/media", "/run/media", "/mnt"] {
+        let children: Vec<PathBuf> = match std::fs::read_dir(base) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.is_dir())
+                .collect(),
+            Err(_) => continue,
+        };
+        // modern layout adds a per-user level: /media/<user>/<volume>
+        if base == "/media" || base == "/run/media" {
+            for c in &children {
+                if let Ok(rd) = std::fs::read_dir(c) {
+                    cands.extend(
+                        rd.filter_map(|e| e.ok().map(|e| e.path()))
+                            .filter(|p| p.is_dir()),
+                    );
+                }
+            }
+        }
+        cands.extend(children);
+    }
+    cands
+}
+
+/// Possible path parts below the volume mount point when the indexed root
+/// was a folder INSIDE the volume (e.g. "/Volumes/X/Backups" → "Backups").
+pub fn stored_subpaths(stored_root: &str) -> Vec<String> {
+    let s = stored_root.replace('\\', "/");
+    let s = s.trim_end_matches('/');
+    let bytes = s.as_bytes();
+    if bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/'
+        && (bytes[0] as char).is_ascii_alphabetic()
+    {
+        return if s.len() > 3 { vec![s[3..].to_string()] } else { vec![] };
+    }
+    let mut subs = Vec::new();
+    for (base, depth) in [("/Volumes/", 1usize), ("/mnt/", 1),
+                          ("/media/", 1), ("/run/media/", 2)] {
+        if let Some(rest) = s.strip_prefix(base) {
+            let parts: Vec<&str> = rest.split('/').collect();
+            // `depth` components name the volume; /media is ambiguous (with
+            // or without the per-user level) so both splits are tried — the
+            // fingerprint check picks the right one.
+            let depths: &[usize] = if base == "/media/" { &[1, 2] } else { std::slice::from_ref(&depth) };
+            for &d in depths {
+                if parts.len() > d {
+                    subs.push(parts[d..].join("/"));
+                }
+            }
+        }
+    }
+    subs
+}
+
+/// (top_level_names, file_samples) from the latest snapshot, used to
+/// recognize the volume's content under a different mount point.
+/// file_samples are (rel_path, size) of the largest regular files — an
+/// exact rel_path + byte-size match is a far stronger signal than a name,
+/// so generic folder names ("Photos", "Backup") can't cause a false
+/// positive on their own.
+fn root_fingerprint(conn: &Connection) -> (Vec<String>, Vec<(String, i64)>) {
+    let sid = match latest_snapshot_id(conn) {
+        Ok(Some(sid)) => sid,
+        _ => return (Vec::new(), Vec::new()),
+    };
+    let names: Vec<String> = conn
+        .prepare(
+            "SELECT rel_path FROM entries
+              WHERE snapshot_id=? AND rel_path NOT LIKE '%/%'
+                AND rel_path NOT LIKE '%\\%' AND rel_path <> '.'
+              ORDER BY is_dir DESC, size DESC LIMIT 12",
+        )
+        .and_then(|mut s| {
+            s.query_map([sid], |r| r.get::<_, String>(0))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default();
+    let files: Vec<(String, i64)> = conn
+        .prepare(
+            "SELECT rel_path, size FROM entries
+              WHERE snapshot_id=? AND is_dir=0 AND is_symlink=0
+                AND error IS NULL AND size > 0
+              ORDER BY size DESC LIMIT 8",
+        )
+        .and_then(|mut s| {
+            s.query_map([sid], |r| {
+                Ok((r.get::<_, String>(0)?.replace('\\', "/"), r.get::<_, i64>(1)?))
+            })
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default();
+    (names, files)
+}
+
+/// (name_hits, file_hits) for a candidate mount point. A file only counts
+/// when it exists at the sampled rel_path with the exact size.
+fn score_base(base: &Path, names: &[String], files: &[(String, i64)]) -> (usize, usize) {
+    let name_hits = names.iter().filter(|n| base.join(n).exists()).count();
+    let file_hits = files
+        .iter()
+        .filter(|(rp, sz)| {
+            std::fs::metadata(base.join(rp))
+                .map(|md| md.is_file() && md.len() as i64 == *sz)
+                .unwrap_or(false)
+        })
+        .count();
+    (name_hits, file_hits)
+}
+
+/// Acceptance rule: a majority of top-level names (min 2 when there are
+/// 2+), AND at least one exact rel_path+size file match whenever the
+/// snapshot has files to sample. Must stay behaviourally identical to
+/// `_fingerprint_passes` in drive_xray.py.
+fn fingerprint_passes(
+    name_hits: usize,
+    file_hits: usize,
+    names: &[String],
+    files: &[(String, i64)],
+) -> bool {
+    if names.is_empty() && files.is_empty() {
+        return false;
+    }
+    if !names.is_empty() {
+        let need = if names.len() == 1 { 1 } else { std::cmp::max(2, (names.len() + 1) / 2) };
+        if name_hits < need {
+            return false;
+        }
+    }
+    if !files.is_empty() && file_hits < 1 {
+        return false;
+    }
+    name_hits + file_hits > 0
+}
+
+/// Map a stored root_path to wherever that volume is mounted right now.
+/// The stored path is preferred when it exists and its content matches the
+/// snapshot fingerprint. If it exists but does NOT match (a different disk
+/// now occupies E:\ or /Volumes/Name), the scan may find the real volume
+/// elsewhere; with no confident match anywhere the stored path is returned
+/// unchanged. Must stay behaviourally identical to `resolve_root` in
+/// drive_xray.py.
+pub fn resolve_root(conn: &Connection, stored_root: &str) -> PathBuf {
+    resolve_root_with(conn, stored_root, None)
+}
+
+pub fn resolve_root_with(
+    conn: &Connection,
+    stored_root: &str,
+    candidates: Option<Vec<PathBuf>>,
+) -> PathBuf {
+    let root = PathBuf::from(stored_root);
+    let (names, files) = root_fingerprint(conn);
+    if root.is_dir() {
+        if names.is_empty() && files.is_empty() {
+            return root; // nothing to compare against — trust it
+        }
+        let (nh, fh) = score_base(&root, &names, &files);
+        if fingerprint_passes(nh, fh, &names, &files) {
+            return root;
+        }
+    }
+    if names.is_empty() && files.is_empty() {
+        return root;
+    }
+    let subs = stored_subpaths(stored_root);
+    let stored_name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let mut best: Option<((usize, bool), PathBuf)> = None;
+    for cand in candidates.unwrap_or_else(mount_candidates) {
+        let mut bases = vec![cand.clone()];
+        bases.extend(subs.iter().map(|s| cand.join(s)));
+        for base in bases {
+            if !base.is_dir() {
+                continue;
+            }
+            let (nh, fh) = score_base(&base, &names, &files);
+            if !fingerprint_passes(nh, fh, &names, &files) {
+                continue;
+            }
+            let name_match = base
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase() == stored_name)
+                .unwrap_or(false);
+            let key = (nh + fh, name_match);
+            if best.as_ref().map(|(k, _)| key > *k).unwrap_or(true) {
+                best = Some((key, base));
+            }
+        }
+    }
+    best.map(|(_, p)| p).unwrap_or(root)
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    #[test]
+    fn subpaths_windows_and_posix() {
+        assert_eq!(stored_subpaths("/Volumes/X"), Vec::<String>::new());
+        assert_eq!(stored_subpaths("/Volumes/X/Backups/2020"),
+                   vec!["Backups/2020".to_string()]);
+        assert_eq!(stored_subpaths("E:\\Backups"), vec!["Backups".to_string()]);
+        assert_eq!(stored_subpaths("E:\\"), Vec::<String>::new());
+        assert_eq!(stored_subpaths("/media/rleite/X/sub"),
+                   vec!["X/sub".to_string(), "sub".to_string()]);
+        assert_eq!(stored_subpaths("/run/media/rleite/X/sub"),
+                   vec!["sub".to_string()]);
+        assert_eq!(stored_subpaths("/Users/rleite"), Vec::<String>::new());
+    }
 }

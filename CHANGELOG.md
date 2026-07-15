@@ -7,9 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-07-15
+
+### Fixed
+- Drives indexed on one OS are now recognized when mounted on another
+  (e.g. indexed on macOS at `/Volumes/MyDisk`, plugged into Windows as
+  `E:\` or into Linux as `/media/<user>/MyDisk`). Both engines resolve
+  the stored `root_path` to the volume's current mount point by matching
+  the snapshot's content against mounted volumes (content fingerprint —
+  no reliance on volume labels). A match requires a majority of the
+  snapshot's top-level names (min 2 when there are 2+) AND at least one
+  of the largest indexed files present at its exact rel_path + byte
+  size, so generic folder names can't cause a false positive. The
+  stored path itself is validated the same way when it still exists —
+  a different disk that took over `E:\` or `/Volumes/Name` is detected
+  and the real volume is found elsewhere. With no confident match the
+  drive is treated as not mounted, exactly as before. Applies to
+  refresh, snapshot, dedupe, export, cleanup/backup scripts,
+  verify-integrity and the UI's mounted-drive checks (`resolve_root` in
+  `drive_xray.py`, `db::resolve_root` in Rust).
+- Python indexing on Windows stored `rel_path` with `\` while the Rust
+  engine always used `/`, making those `.db` files non-portable (and
+  invisible to the new mount resolution). The Python indexer now always
+  stores `/`, and both engines normalize old Windows-rooted `.db` files
+  on open (POSIX-rooted dbs are untouched — `\` is a legal filename
+  character there).
+- The Rust engine detection in the UI now validates candidates with
+  `dx --version`, also looks in `/opt/homebrew/bin`, `/usr/local/bin`
+  and next to `app.py` (Finder/Dock launches often lack Homebrew in
+  PATH, which made the engine flip between runs), and surfaces the
+  fallback reason in the sidebar.
+- The concurrent index/refresh guard now works on Windows (it shelled
+  out to `ps`, which doesn't exist there; uses CIM via PowerShell).
+- UI defaults that assumed macOS (`/Volumes/`) are now platform-aware
+  (index path suggestion and backup target).
+
 ### Added
-- GitHub Actions: `tests` workflow runs `cargo test` on macos-13 (Intel)
-  and macos-14 (Apple Silicon) on every push and PR, plus a separate
+- Persistent operation log + live status: index/refresh/snapshot output is
+  tee'd to `<drive>.db.log`, so closing the browser tab no longer loses the
+  log. The app shows the last progress line next to the ⏳ badge in the
+  sidebar and a reviewable "📜 Log da operação" panel on the drive page
+  (also while the drive is busy/locked). The `.log` sidecar is removed
+  together with the drive's `.db`.
+- Stale-engine warning: the sidebar now warns when the `dx` binary version
+  differs from the app version (an old `dx.exe` silently misses features
+  like exclusions, checkpointing and cross-OS mount resolution).
+- `setup_shortcuts.ps1` (Windows): creates Desktop + Start Menu launch
+  shortcuts for drive-xray, optional launch-at-login (`-Startup`), and
+  `-Remove` to undo. Auto-detects a sibling
+  [media-catalog](https://github.com/rbleite/media-catalog) checkout and
+  creates its shortcuts too (its `run.bat` uses port 8503, so both apps
+  can run simultaneously).
+- CI: `pytest` job on ubuntu-latest and windows-latest running the
+  Python test suite (previously only `cargo test` + parity ran in CI).
+
+### Added
+- GitHub Actions: `tests` workflow runs `cargo test` on macos-15-intel
+  (Intel; replaces the retired macos-13 image), macos-14 (Apple Silicon)
+  and windows-latest on every push and PR, plus a separate
   `parity` job that sets up a Python venv to run the cross-implementation
   parity tests.
 - GitHub Actions: `release` workflow auto-builds the universal binary

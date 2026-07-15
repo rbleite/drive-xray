@@ -23,10 +23,10 @@ import pandas as pd
 
 from drive_xray import (
     open_db, fill_full_hashes, compute_dir_hashes, human,
-    get_hash_version, HASH_VERSION, _duplicate_rows,
+    get_hash_version, HASH_VERSION, DX_VERSION, _duplicate_rows,
     compute_folder_sizes, generate_cleanup_script,
     CLEANUP_STRATEGIES, CLEANUP_ACTIONS,
-    latest_snapshot_id, list_snapshots, diff_snapshots,
+    latest_snapshot_id, list_snapshots, diff_snapshots, resolve_root,
     registry_list, registry_remove, registry_register,
     cross_dedupe, single_copy_files, cold_data, read_drive_index_opts,
     generate_backup_script,
@@ -91,32 +91,75 @@ DB_DIR.mkdir(parents=True, exist_ok=True)
 # commands (index / refresh / snapshot / compact). The Python script is
 # always used for the in-process helpers (drive_info, dup_file_groups,
 # treemap_rows, …) because no subprocess is involved there.
-def _dx_command_prefix() -> list[str]:
-    """Resolve the indexer command prefix once.
+def _dx_probe(cand: str) -> str | None:
+    """A candidate only counts as the Rust engine if `dx --version` runs and
+    identifies itself — any executable that merely happens to be called `dx`
+    (fairly common name) must not be trusted with index/refresh commands.
+    Returns the reported version ("1.3.0") or None when rejected."""
+    try:
+        out = subprocess.run([cand, "--version"], capture_output=True,
+                             text=True, timeout=10)
+        first = (out.stdout or "").strip().splitlines()[:1]
+        if out.returncode == 0 and first and first[0].startswith("dx "):
+            return first[0].split()[1]
+        return None
+    except Exception:
+        return None
+
+
+def _dx_command_prefix() -> tuple[list[str], str, str]:
+    """Resolve the indexer command prefix once. Returns (cmd, reason, version)
+    where reason explains a Python fallback ("" when Rust is used) and
+    version is the dx binary's self-reported version ("" for Python).
     Order of preference:
       1. $DRIVE_XRAY_DX env var (explicit override)
-      2. ./rust/target/{universal,release}/dx adjacent to this file
-      3. `dx` on PATH
-      4. fall back to Python: [sys.executable, drive_xray.py]
+      2. ./rust/target/{universal,release,debug}/dx adjacent to this file
+      3. dx(.exe) next to app.py (the README's drop-in install on Windows)
+      4. well-known install dirs — Finder/Dock launches often have a PATH
+         without /opt/homebrew/bin, which made the engine flip between
+         Rust and Python depending on how the app was started
+      5. `dx` on PATH
+      6. fall back to Python: [sys.executable, drive_xray.py]
+    Every candidate must pass a `dx --version` probe before being used.
     """
+    rejected: list[str] = []
+
+    def try_cand(p) -> tuple[list[str], str] | None:
+        p = str(p)
+        ver = _dx_probe(p)
+        if ver:
+            return [p], ver
+        rejected.append(p)
+        return None
+
     env = os.environ.get("DRIVE_XRAY_DX")
     if env and Path(env).is_file() and os.access(env, os.X_OK):
-        return [env]
-    here = Path(__file__).parent / "rust" / "target"
-    # binary name is dx on unix, dx.exe on Windows (no universal build there)
+        got = try_cand(env)
+        if got:
+            return got[0], "", got[1]
+    here = Path(__file__).parent
     exe = "dx.exe" if os.name == "nt" else "dx"
-    for cand in (here / "universal" / exe,
-                 here / "release" / exe,
-                 here / "debug" / exe):
+    cands = [here / "rust" / "target" / "universal" / exe,
+             here / "rust" / "target" / "release" / exe,
+             here / "rust" / "target" / "debug" / exe,
+             here / exe]
+    if os.name != "nt":
+        cands += [Path("/opt/homebrew/bin/dx"), Path("/usr/local/bin/dx")]
+    for cand in cands:
         if cand.is_file() and os.access(cand, os.X_OK):
-            return [str(cand)]
+            got = try_cand(cand)
+            if got:
+                return got[0], "", got[1]
     on_path = shutil.which("dx")
     if on_path:
-        return [on_path]
-    return [sys.executable, str(SCRIPT)]
+        got = try_cand(on_path)
+        if got:
+            return got[0], "", got[1]
+    reason = ("rejected: " + ", ".join(rejected)) if rejected else "dx not found"
+    return [sys.executable, str(SCRIPT)], reason, ""
 
 
-DX_CMD = _dx_command_prefix()
+DX_CMD, DX_FALLBACK_REASON, DX_BIN_VERSION = _dx_command_prefix()
 DX_IS_RUST = len(DX_CMD) == 1  # heuristic: a single token means a binary
 
 _CACHE_FLOOR = 1048576  # 1 MB floor for dup groups
@@ -185,6 +228,11 @@ TRANSLATIONS = {
         "drive_busy": "⏳ `{name}` está ocupada — indexação/refresh em curso. Os dados estão intactos; espera que termine.",
         "drive_busy_retry": "🔄 Tentar de novo",
         "drive_indexing": "⏳ a indexar… (PID {pid})",
+        "op_log_title": "📜 Log da operação",
+        "op_log_refresh": "Atualizar o log",
+        "engine_stale": "⚠️ O binário dx é a v{have} mas a app é a v{want} — "
+                        "substitui o dx(.exe) pela release v{want}; o binário "
+                        "antigo não tem as correções e funcionalidades novas.",
         "indexed_on": "indexada em",
         "tab_summary": "📊 Resumo",
         "tab_dupes": "🔁 Duplicados",
@@ -484,6 +532,11 @@ TRANSLATIONS = {
         "drive_busy": "⏳ `{name}` is busy — an index/refresh is in progress. Your data is intact; wait for it to finish.",
         "drive_busy_retry": "🔄 Try again",
         "drive_indexing": "⏳ indexing… (PID {pid})",
+        "op_log_title": "📜 Operation log",
+        "op_log_refresh": "Refresh the log",
+        "engine_stale": "⚠️ The dx binary is v{have} but the app is v{want} — "
+                        "replace dx(.exe) with the v{want} release build; the "
+                        "old binary is missing new fixes and features.",
         "indexed_on": "indexed on",
         "tab_summary": "📊 Summary",
         "tab_dupes": "🔁 Duplicates",
@@ -761,9 +814,31 @@ def t(key: str, **fmt) -> str:
 
 # ---------- subprocess: indexer ----------
 
-def _spawn(cmd: list[str], label: str) -> None:
-    """Launch a long-running CLI subprocess and stream its output into
-    st.session_state.idx_log."""
+def _log_path(db: Path) -> Path:
+    """Persistent log of the last index/refresh/snapshot of this drive —
+    lives next to the .db so it survives closed tabs and app restarts."""
+    return Path(str(db) + ".log")
+
+
+def _log_tail(db: Path, n: int = 20) -> list[str]:
+    try:
+        lines = _log_path(db).read_text(
+            encoding="utf-8", errors="replace").splitlines()
+        return [l for l in lines if l.strip()][-n:]
+    except OSError:
+        return []
+
+
+def _spawn(cmd: list[str], label: str, db: Path) -> None:
+    """Launch a long-running CLI subprocess. Output streams into
+    st.session_state.idx_log AND into <db>.log, so progress can still be
+    followed after the browser tab (and its session log) is gone."""
+    try:
+        lf = open(_log_path(db), "w", encoding="utf-8", errors="replace")
+        lf.write("$ " + " ".join(cmd) + "\n")
+        lf.flush()
+    except OSError:
+        lf = None
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         bufsize=1, text=True,
@@ -775,7 +850,19 @@ def _spawn(cmd: list[str], label: str) -> None:
             for piece in line.replace("\r", "\n").splitlines():
                 if piece.strip():
                     log.append(piece)
+                    if lf:
+                        try:
+                            lf.write(piece + "\n")
+                            lf.flush()
+                        except OSError:
+                            pass
         proc.stdout.close()
+        if lf:
+            try:
+                lf.write(f"[exit {proc.wait()}]\n")
+                lf.close()
+            except OSError:
+                pass
 
     threading.Thread(target=reader, daemon=True).start()
     st.session_state.idx_proc = proc
@@ -793,19 +880,19 @@ def start_indexer(root: str, label: str, do_full: bool,
         cmd.append("--one-filesystem")
     if skip_cloud:
         cmd.append("--skip-cloud")
-    _spawn(cmd, label)
+    _spawn(cmd, label, db_out)
 
 
 def start_refresh(db: Path) -> None:
-    _spawn([*DX_CMD, "refresh", str(db)], db.stem)
+    _spawn([*DX_CMD, "refresh", str(db)], db.stem, db)
 
 
 def start_compact(db: Path) -> None:
-    _spawn([*DX_CMD, "compact", str(db)], db.stem)
+    _spawn([*DX_CMD, "compact", str(db)], db.stem, db)
 
 
 def start_snapshot(db: Path) -> None:
-    _spawn([*DX_CMD, "snapshot", "take", str(db)], db.stem)
+    _spawn([*DX_CMD, "snapshot", "take", str(db)], db.stem, db)
 
 
 @st.cache_data(ttl=3, show_spinner=False)
@@ -816,10 +903,19 @@ def _active_index_procs() -> dict:
     what prevents a second refresh from being launched over a running one.
     Cached for 3s so we don't run `ps` on every micro-rerun."""
     try:
-        out = subprocess.run(
-            ["ps", "-Ao", "pid=,command="],
-            capture_output=True, text=True, timeout=5,
-        ).stdout
+        if os.name == "nt":
+            # no `ps` on Windows — same "pid commandline" shape via CIM
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_Process | ForEach-Object"
+                 " { '{0} {1}' -f $_.ProcessId, $_.CommandLine }"],
+                capture_output=True, text=True, timeout=15,
+            ).stdout
+        else:
+            out = subprocess.run(
+                ["ps", "-Ao", "pid=,command="],
+                capture_output=True, text=True, timeout=5,
+            ).stdout
     except Exception:
         return {}
     procs: dict[str, int] = {}
@@ -873,6 +969,9 @@ def drive_info(db: Path) -> dict | str | None:
         n_snapshots = conn.execute(
             "SELECT COUNT(*) FROM snapshots"
         ).fetchone()[0]
+        # a drive indexed on another OS/machine mounts elsewhere (e.g.
+        # /Volumes/X on macOS → E:\ on Windows) — resolve to the live mount
+        resolved_root = str(resolve_root(conn, row[1])) if row and row[1] else None
         conn.close()
     except sqlite3.OperationalError as e:
         # "database is locked" during an in-progress index/refresh is transient,
@@ -888,6 +987,8 @@ def drive_info(db: Path) -> dict | str | None:
     d = dict(zip(
         ["label", "root", "indexed_at", "files", "dirs", "size"], row
     ))
+    if resolved_root:
+        d["root"] = resolved_root
     d["snapshot_id"] = sid
     d["n_snapshots"] = n_snapshots
     return d
@@ -1198,10 +1299,10 @@ def build_xlsx(rows: list[dict]) -> bytes:
 
 
 def delete_db_files(target: Path) -> None:
-    """Remove the .db plus any -wal/-shm/-journal sidecars, and deregister."""
+    """Remove the .db plus any -wal/-shm/-journal/.log sidecars, and deregister."""
     registry_remove(target)
     target.unlink(missing_ok=True)
-    for ext in ("-wal", "-shm", "-journal"):
+    for ext in ("-wal", "-shm", "-journal", ".log"):
         sib = Path(str(target) + ext)
         sib.unlink(missing_ok=True)
 
@@ -1231,7 +1332,14 @@ with st.sidebar:
         st.rerun()
 
     st.title("💾 drive-xray")
-    st.caption(f"engine: {'🦀 Rust' if DX_IS_RUST else '🐍 Python'}  ·  `{DX_CMD[0]}`")
+    st.caption(f"engine: {'🦀 Rust' if DX_IS_RUST else '🐍 Python'}  ·  `{DX_CMD[0]}`",
+               help=(None if DX_IS_RUST else
+                     f"Rust dx unavailable ({DX_FALLBACK_REASON}); "
+                     "using the Python engine."))
+    # a stale dx binary silently misses features (exclusions, cross-OS mount
+    # resolution, checkpointing) — warn when it doesn't match the app version
+    if DX_IS_RUST and DX_BIN_VERSION and DX_BIN_VERSION != DX_VERSION:
+        st.warning(t("engine_stale", have=DX_BIN_VERSION, want=DX_VERSION))
 
     # ── self-update from GitHub ────────────────────────────────────────────
     with st.expander(t("upd_title"), expanded=False):
@@ -1328,7 +1436,9 @@ with st.sidebar:
                 st.session_state.pending_delete = str(db)
                 st.rerun()
             if _db_busy:
-                c1.caption(t("drive_indexing", pid=_db_pid))
+                _last = _log_tail(db, 1)
+                c1.caption(t("drive_indexing", pid=_db_pid)
+                           + (f"\n\n`{_last[-1][:60]}`" if _last else ""))
         if current_path:
             selected_db = Path(current_path)
     else:
@@ -1339,10 +1449,12 @@ with st.sidebar:
 
     # native folder picker — must live outside the form (forms allow only a
     # submit button), so it writes the path into session_state and reruns.
-    st.session_state.setdefault("idx_root_v", "/Volumes/")
+    _browse_default = ("/Volumes/" if sys.platform == "darwin"
+                       else "" if os.name == "nt" else "/media/")
+    st.session_state.setdefault("idx_root_v", _browse_default)
     _pk1, _pk2 = st.columns([1, 2])
     if _pk1.button(t("browse_btn"), key="pick_idx_btn", width="stretch"):
-        _picked = pick_folder_dialog(st.session_state.get("idx_root_v") or "/Volumes/")
+        _picked = pick_folder_dialog(st.session_state.get("idx_root_v") or _browse_default)
         if _picked:
             st.session_state["idx_root_v"] = _picked
             st.rerun()
@@ -1603,9 +1715,27 @@ if selected_db is None:
     st.markdown(t("main_welcome_body"))
     st.stop()
 
+def _render_op_status(db: Path, running: bool) -> None:
+    """Live status + reviewable log of the drive's index/refresh, read from
+    the persistent <db>.log — works even after the tab that launched the
+    operation was closed (the in-session log dies with the session)."""
+    tail = _log_tail(db, 25)
+    if not tail:
+        return
+    if running:
+        st.caption(f"⏳ `{tail[-1][:120]}`")
+    with st.expander(t("op_log_title"), expanded=running):
+        st.code("\n".join(tail))
+    if running and st.button("🔄", key=f"oplog_refresh_{db}",
+                             help=t("op_log_refresh")):
+        st.rerun()
+
+
 info = drive_info(selected_db)
+_selected_busy = str(selected_db.resolve()) in _busy_procs
 if info == DRIVE_LOCKED:
     st.info(t("drive_busy", name=selected_db.name))
+    _render_op_status(selected_db, running=True)
     if st.button(t("drive_busy_retry"), key="drive_busy_retry_btn"):
         st.rerun()
     st.stop()
@@ -1615,6 +1745,8 @@ if info is None:
 
 st.title(f"💾 {info['label']}")
 st.caption(f"`{info['root']}`  ·  {t('indexed_on')} {info['indexed_at']}")
+if _selected_busy:
+    _render_op_status(selected_db, running=True)
 
 tab_summary, tab_dupes, tab_map, tab_history, tab_compare = st.tabs(
     [t("tab_summary"), t("tab_dupes"), t("tab_map"),
@@ -2739,8 +2871,10 @@ with tab_compare:
                 st.markdown(f"**{t('bkp_title')}**")
                 st.caption(t("bkp_caption"))
                 _bt1, _bt2 = st.columns([3, 1])
+                _bkp_default = ("/Volumes/" if sys.platform == "darwin"
+                                else "" if os.name == "nt" else "/media/")
                 _bkp_target = _bt1.text_input(t("bkp_target"),
-                                              value="/Volumes/", key="bkp_target")
+                                              value=_bkp_default, key="bkp_target")
                 _bkp_shell = _bt2.selectbox(t("bkp_shell"),
                                             ["rsync (.sh)", "robocopy (.bat)"],
                                             key="bkp_shell")
