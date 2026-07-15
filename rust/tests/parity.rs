@@ -5,6 +5,10 @@
 //!
 //! Skipped (via `eprintln!` + early-return) when the Python venv or
 //! script is missing, so CI on machines without them still passes.
+//! Unix-only: the fixture uses `std::os::unix::fs::symlink` and the venv
+//! is looked up at the Unix path `.venv/bin/python` — on Windows the suite
+//! wouldn't compile and could never run anyway.
+#![cfg(unix)]
 
 use rusqlite::Connection;
 use std::collections::HashMap;
