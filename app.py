@@ -91,32 +91,69 @@ DB_DIR.mkdir(parents=True, exist_ok=True)
 # commands (index / refresh / snapshot / compact). The Python script is
 # always used for the in-process helpers (drive_info, dup_file_groups,
 # treemap_rows, …) because no subprocess is involved there.
-def _dx_command_prefix() -> list[str]:
-    """Resolve the indexer command prefix once.
+def _dx_probe(cand: str) -> bool:
+    """A candidate only counts as the Rust engine if `dx --version` runs and
+    identifies itself — any executable that merely happens to be called `dx`
+    (fairly common name) must not be trusted with index/refresh commands."""
+    try:
+        out = subprocess.run([cand, "--version"], capture_output=True,
+                             text=True, timeout=10)
+        return out.returncode == 0 and out.stdout.strip().startswith("dx ")
+    except Exception:
+        return False
+
+
+def _dx_command_prefix() -> tuple[list[str], str]:
+    """Resolve the indexer command prefix once. Returns (cmd, reason) where
+    reason explains a Python fallback ("" when Rust is used).
     Order of preference:
       1. $DRIVE_XRAY_DX env var (explicit override)
-      2. ./rust/target/{universal,release}/dx adjacent to this file
-      3. `dx` on PATH
-      4. fall back to Python: [sys.executable, drive_xray.py]
+      2. ./rust/target/{universal,release,debug}/dx adjacent to this file
+      3. dx(.exe) next to app.py (the README's drop-in install on Windows)
+      4. well-known install dirs — Finder/Dock launches often have a PATH
+         without /opt/homebrew/bin, which made the engine flip between
+         Rust and Python depending on how the app was started
+      5. `dx` on PATH
+      6. fall back to Python: [sys.executable, drive_xray.py]
+    Every candidate must pass a `dx --version` probe before being used.
     """
+    rejected: list[str] = []
+
+    def try_cand(p) -> list[str] | None:
+        p = str(p)
+        if _dx_probe(p):
+            return [p]
+        rejected.append(p)
+        return None
+
     env = os.environ.get("DRIVE_XRAY_DX")
     if env and Path(env).is_file() and os.access(env, os.X_OK):
-        return [env]
-    here = Path(__file__).parent / "rust" / "target"
-    # binary name is dx on unix, dx.exe on Windows (no universal build there)
+        got = try_cand(env)
+        if got:
+            return got, ""
+    here = Path(__file__).parent
     exe = "dx.exe" if os.name == "nt" else "dx"
-    for cand in (here / "universal" / exe,
-                 here / "release" / exe,
-                 here / "debug" / exe):
+    cands = [here / "rust" / "target" / "universal" / exe,
+             here / "rust" / "target" / "release" / exe,
+             here / "rust" / "target" / "debug" / exe,
+             here / exe]
+    if os.name != "nt":
+        cands += [Path("/opt/homebrew/bin/dx"), Path("/usr/local/bin/dx")]
+    for cand in cands:
         if cand.is_file() and os.access(cand, os.X_OK):
-            return [str(cand)]
+            got = try_cand(cand)
+            if got:
+                return got, ""
     on_path = shutil.which("dx")
     if on_path:
-        return [on_path]
-    return [sys.executable, str(SCRIPT)]
+        got = try_cand(on_path)
+        if got:
+            return got, ""
+    reason = ("rejected: " + ", ".join(rejected)) if rejected else "dx not found"
+    return [sys.executable, str(SCRIPT)], reason
 
 
-DX_CMD = _dx_command_prefix()
+DX_CMD, DX_FALLBACK_REASON = _dx_command_prefix()
 DX_IS_RUST = len(DX_CMD) == 1  # heuristic: a single token means a binary
 
 _CACHE_FLOOR = 1048576  # 1 MB floor for dup groups
@@ -816,10 +853,19 @@ def _active_index_procs() -> dict:
     what prevents a second refresh from being launched over a running one.
     Cached for 3s so we don't run `ps` on every micro-rerun."""
     try:
-        out = subprocess.run(
-            ["ps", "-Ao", "pid=,command="],
-            capture_output=True, text=True, timeout=5,
-        ).stdout
+        if os.name == "nt":
+            # no `ps` on Windows — same "pid commandline" shape via CIM
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_Process | ForEach-Object"
+                 " { '{0} {1}' -f $_.ProcessId, $_.CommandLine }"],
+                capture_output=True, text=True, timeout=15,
+            ).stdout
+        else:
+            out = subprocess.run(
+                ["ps", "-Ao", "pid=,command="],
+                capture_output=True, text=True, timeout=5,
+            ).stdout
     except Exception:
         return {}
     procs: dict[str, int] = {}
@@ -1236,7 +1282,10 @@ with st.sidebar:
         st.rerun()
 
     st.title("💾 drive-xray")
-    st.caption(f"engine: {'🦀 Rust' if DX_IS_RUST else '🐍 Python'}  ·  `{DX_CMD[0]}`")
+    st.caption(f"engine: {'🦀 Rust' if DX_IS_RUST else '🐍 Python'}  ·  `{DX_CMD[0]}`",
+               help=(None if DX_IS_RUST else
+                     f"Rust dx unavailable ({DX_FALLBACK_REASON}); "
+                     "using the Python engine."))
 
     # ── self-update from GitHub ────────────────────────────────────────────
     with st.expander(t("upd_title"), expanded=False):

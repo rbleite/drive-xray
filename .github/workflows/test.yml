@@ -54,6 +54,29 @@ jobs:
           [ "$RUNNER_OS" = "Windows" ] && EXT=".exe" || EXT=""
           "./rust/target/release/dx${EXT}" --version
 
+  pytest:
+    name: pytest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-latest included on purpose: it catches path-separator and
+        # drive-letter bugs the macOS/Linux jobs can't see.
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install deps
+        run: pip install -r requirements.txt pytest
+
+      - name: run Python test suite
+        # Rust-parity tests auto-skip when the dx binary isn't built.
+        run: pytest -q tests/
+
   parity:
     name: parity Python ↔ Rust
     runs-on: macos-14

@@ -364,15 +364,22 @@ Podes consultar diretamente com `sqlite3 backup-2024.db`.
 
 O `root_path` fica gravado na `.db` tal como estava na altura da indexação
 (`/Volumes/MeuDisco` no macOS, `E:\` no Windows, `/media/<user>/MeuDisco`
-no Linux). Quando o caminho gravado já não existe, o dx procura o volume
-nos mount points da plataforma actual e aceita um candidato quando as
-entradas de topo do último snapshot existem lá de facto (impressão digital
-por conteúdo — não depende do nome/label do volume, que o exFAT põe em
-maiúsculas e o Windows nem sequer expõe no caminho). Isto aplica-se a
-`refresh`, `snapshot`, `dedupe`, `export`, scripts de cleanup/backup,
-verificação de integridade e aos avisos de "drive não montada" na UI.
-Se o volume não for encontrado em lado nenhum, o comportamento é o de
-sempre: a drive é tratada como não montada.
+no Linux). O dx valida o caminho gravado e, se necessário, procura o volume
+nos mount points da plataforma actual, usando uma impressão digital por
+conteúdo: um candidato só é aceite com a maioria dos nomes de topo do
+último snapshot presentes (mínimo 2 quando há 2+) **e** pelo menos um dos
+maiores ficheiros indexados presente no mesmo caminho relativo com o
+tamanho exacto em bytes. Nomes genéricos ("Photos", "Backup") não chegam
+para um falso positivo, e um disco diferente que tenha ocupado o caminho
+antigo (`E:\` reatribuído, `/Volumes/Nome` reutilizado) é detectado — o
+volume verdadeiro é procurado noutro mount point. Não depende do
+nome/label do volume (o exFAT põe labels em maiúsculas e o Windows nem
+sequer o expõe no caminho). Isto aplica-se a `refresh`, `snapshot`,
+`dedupe`, `export`, scripts de cleanup/backup, verificação de integridade
+e aos avisos de "drive não montada" na UI. Sem correspondência confiante
+em lado nenhum, o comportamento é o de sempre: a drive é tratada como não
+montada. Nota: drives de rede/UNC não são pesquisadas — o caminho gravado
+é usado tal e qual.
 
 ## Limitações conhecidas
 
