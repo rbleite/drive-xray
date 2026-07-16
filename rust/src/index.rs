@@ -40,6 +40,27 @@ pub struct ReuseEntry {
     pub full: Option<[u8; 32]>,
 }
 
+/// True when two mtimes should be treated as "unchanged" for hash reuse.
+/// ≤2s covers FAT/exFAT timestamp granularity and HFS+ (1s) vs APFS (1ns).
+/// exFAT additionally stores LOCAL time: the same untouched file can appear
+/// shifted by whole hours when the drive moves between OSes/timezones/DST
+/// interpretations, which silently disabled all hash reuse on cross-OS
+/// refreshes. A difference within ±26h that is a whole-hour multiple (±2s)
+/// is therefore also treated as unchanged — the same pragmatic trade-off as
+/// rsync's --modify-window on FAT drives. Size must still match exactly.
+/// Must stay identical to `_mtimes_equivalent` in drive_xray.py.
+pub fn mtimes_equivalent(a: f64, b: f64) -> bool {
+    let dt = (a - b).abs();
+    if dt <= 2.0 {
+        return true;
+    }
+    if dt > 26.0 * 3600.0 + 2.0 {
+        return false;
+    }
+    let r = dt % 3600.0;
+    r <= 2.0 || r >= 3598.0
+}
+
 /// Build the reuse cache by reading the latest snapshot from `conn`.
 pub fn build_reuse_cache(conn: &Connection) -> Result<ReuseCache> {
     let sid = match db::latest_snapshot_id(conn)? {
@@ -305,11 +326,13 @@ fn hash_update_phase(
                 let mut full: Option<[u8; 32]> = None;
                 let mut reused = false;
 
-                // 1) reuse cache (size + mtime within 1s: HFS+ 1s vs APFS 1ns)
+                // 1) reuse cache — size exact + tolerant mtime compare
+                //    (see mtimes_equivalent: FAT granularity + exFAT
+                //    local-time hour shifts between OSes)
                 if let Some(cache) = reuse {
                     if let Some(c) = cache.get(&e.rel_path) {
                         if c.size == size
-                            && (c.mtime - e.mtime.unwrap_or(0.0)).abs() < 1.0
+                            && mtimes_equivalent(c.mtime, e.mtime.unwrap_or(0.0))
                         {
                             partial = c.partial;
                             full = c.full;
@@ -463,4 +486,26 @@ fn read_drive_and_cache(
     let cache = build_reuse_cache(&conn)?;
     let sid = db::latest_snapshot_id(&conn)?;
     Ok((root, drv.1, one_fs, skip_cloud, cache, sid))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mtimes_equivalent;
+
+    #[test]
+    fn mtime_tolerance() {
+        // plain granularity window
+        assert!(mtimes_equivalent(1000.0, 1000.0));
+        assert!(mtimes_equivalent(1000.0, 1001.9));
+        assert!(!mtimes_equivalent(1000.0, 1003.0));
+        // exFAT local-time hour shifts (either direction, incl. DST-style ±1h)
+        assert!(mtimes_equivalent(1000.0, 1000.0 + 3600.0));
+        assert!(mtimes_equivalent(1000.0 + 3600.0, 1000.0));
+        assert!(mtimes_equivalent(1000.0, 1000.0 + 5.0 * 3600.0 + 1.5));
+        assert!(mtimes_equivalent(1000.0, 1000.0 + 26.0 * 3600.0));
+        // beyond ±26h or off the hour grid: a real modification
+        assert!(!mtimes_equivalent(1000.0, 1000.0 + 27.0 * 3600.0));
+        assert!(!mtimes_equivalent(1000.0, 1000.0 + 1800.0));
+        assert!(!mtimes_equivalent(1000.0, 1000.0 + 3600.0 + 30.0));
+    }
 }

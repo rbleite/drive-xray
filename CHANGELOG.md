@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Cross-OS refresh of exFAT drives re-hashed every file: exFAT stores
+  local time, so the same untouched file can appear shifted by whole
+  hours between macOS and Windows (timezone/DST interpretation), which
+  silently disabled all hash reuse. The reuse compare in both engines
+  now also accepts mtime differences that are whole-hour multiples
+  (±2s) within ±26h — the same trade-off as rsync's `--modify-window`
+  on FAT drives. The base tolerance widens from 1s to 2s (FAT/exFAT
+  timestamp granularity). Size must still match exactly.
+
+### Added
+- One-click "ignore system folders" exclusion set (`Windows`,
+  `Program Files`, `Program Files (x86)`, `ProgramData`, `AppData`,
+  `node_modules`, `PerfLogs`, `Recovery`, `$WinREAgent`): a default-on
+  checkbox when indexing a new drive (seeded into the .db before the
+  indexer starts, honoured by both engines) and a button in the
+  Exclusions panel for existing drives.
+
 ## [1.4.0] — 2026-07-15
 
 ### Fixed

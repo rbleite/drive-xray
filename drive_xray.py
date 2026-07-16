@@ -1485,6 +1485,26 @@ def get_hash_version(conn: sqlite3.Connection) -> int:
 
 # ---------- indexing ----------
 
+def _mtimes_equivalent(a: float, b: float) -> bool:
+    """True when two mtimes should be treated as "unchanged" for hash reuse.
+
+    ≤2s covers FAT/exFAT timestamp granularity and HFS+ (1s) vs APFS (1ns).
+    exFAT additionally stores LOCAL time: the same untouched file can appear
+    shifted by whole hours when the drive moves between OSes/timezones/DST
+    interpretations, which silently disabled all hash reuse on cross-OS
+    refreshes. A difference within ±26h that is a whole-hour multiple (±2s)
+    is therefore also treated as unchanged — the same pragmatic trade-off as
+    rsync's --modify-window on FAT drives. Size must still match exactly.
+    Must stay identical to `mtimes_equivalent` in rust/src/index.rs."""
+    dt = abs(a - b)
+    if dt <= 2.0:
+        return True
+    if dt > 26 * 3600 + 2:
+        return False
+    r = dt % 3600.0
+    return r <= 2.0 or r >= 3598.0
+
+
 def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
                 one_fs: bool = False, skip_cloud: bool = False,
                 reuse_old: dict | None = None,
@@ -1697,8 +1717,9 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
                 cached = reuse_old.get(rel)
                 if cached:
                     old_size, old_mtime, old_partial, old_full = cached
-                    # mtime tolerance: 1s handles HFS+ (1s) vs APFS (1ns)
-                    if old_size == size and old_mtime is not None and abs(old_mtime - st.st_mtime) < 1.0:
+                    # tolerant compare — see _mtimes_equivalent (FAT granularity
+                    # + exFAT local-time hour shifts between OSes)
+                    if old_size == size and old_mtime is not None and _mtimes_equivalent(old_mtime, st.st_mtime):
                         partial = old_partial
                         full = old_full
                         reused += 1
