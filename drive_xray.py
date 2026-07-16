@@ -54,6 +54,17 @@ SKIP_DIR_NAMES = {
     ".vol", "System Volume Information", "$RECYCLE.BIN",
 }
 
+# Folder names owned by the OS / package managers, offered as a one-click
+# exclusion set in the UI ("ignore system folders"). Unlike SKIP_DIR_NAMES
+# these are NOT skipped unconditionally — a user may genuinely want them —
+# they are just seeded into the drive's exclusion list on request, where the
+# exclusions engine matches bare names at any depth. Indexing a whole system
+# disk (C:\, /) without these easily doubles or triples the file count.
+SYSTEM_EXCLUDE_DIRS = [
+    "Windows", "Program Files", "Program Files (x86)", "ProgramData",
+    "AppData", "node_modules", "PerfLogs", "Recovery", "$WinREAgent",
+]
+
 # Cloud sync folder patterns. Matched case-insensitively against directory
 # names; `startswith` so variants like "OneDrive - Acme Corp" also match.
 CLOUD_DIR_PREFIXES = (
