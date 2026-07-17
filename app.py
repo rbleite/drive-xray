@@ -32,7 +32,7 @@ from drive_xray import (
     generate_backup_script,
     verify_file, execute_file_action, QUARANTINE_DIR, AUDIT_LOG,
     read_config, write_config, get_db_dir, import_folder,
-    get_exclusions, set_exclusions,
+    get_exclusions, set_exclusions, SYSTEM_EXCLUDE_DIRS,
     tags_get, tags_set, tags_search, notes_get, notes_set,
     compute_auto_tags, AUTO_TAGS_YAML_PATH, write_default_auto_tag_rules,
     get_auto_tag_rules,
@@ -214,6 +214,8 @@ TRANSLATIONS = {
         "one_fs_help": "Não atravessa mount points. Evita /Volumes/* e firmlinks do APFS.",
         "skip_cloud_label": "Ignorar pastas de cloud (--skip-cloud)",
         "skip_cloud_help": "Salta iCloud, OneDrive, Google Drive, Dropbox, Box, MEGA, Proton Drive, etc.",
+        "skip_system_label": "Ignorar pastas de sistema",
+        "skip_system_help": "Exclui {names}. Recomendado ao indexar o disco de sistema (C:\\, /); desliga se estas pastas te interessarem.",
         "index_button": "Indexar",
         "path_not_exist": "Caminho inexistente.",
         "indexing": "⏳ A indexar **{label}**…",
@@ -397,6 +399,9 @@ TRANSLATIONS = {
         "excl_or_type": "…ou nome/padrão",
         "excl_add_btn": "➕ Excluir",
         "excl_added": "Exclusão adicionada — faz refresh para aplicar.",
+        "excl_system_btn": "🖥️ Adicionar pastas de sistema",
+        "excl_system_help": "Adiciona de uma vez: {names}. Essencial ao indexar o disco de sistema (C:\\, /) — corta a maior parte dos ficheiros irrelevantes.",
+        "excl_system_added": "{n} exclusões de sistema adicionadas — faz refresh para aplicar.",
         "excl_current": "Excluídas nesta drive:",
         "excl_refresh_hint": "🔄 Faz refresh da drive para aplicar as exclusões.",
         "excl_none": "Sem exclusões nesta drive.",
@@ -518,6 +523,8 @@ TRANSLATIONS = {
         "one_fs_help": "Does not cross mount points. Avoids /Volumes/* and APFS firmlinks.",
         "skip_cloud_label": "Skip cloud folders (--skip-cloud)",
         "skip_cloud_help": "Skips iCloud, OneDrive, Google Drive, Dropbox, Box, MEGA, Proton Drive, etc.",
+        "skip_system_label": "Ignore system folders",
+        "skip_system_help": "Excludes {names}. Recommended when indexing the system disk (C:\\, /); untick if you want those folders indexed.",
         "index_button": "Index",
         "path_not_exist": "Path does not exist.",
         "indexing": "⏳ Indexing **{label}**…",
@@ -701,6 +708,9 @@ TRANSLATIONS = {
         "excl_or_type": "…or name/pattern",
         "excl_add_btn": "➕ Exclude",
         "excl_added": "Exclusion added — refresh to apply.",
+        "excl_system_btn": "🖥️ Add system folders",
+        "excl_system_help": "Adds in one click: {names}. Essential when indexing the system disk (C:\\, /) — cuts most of the irrelevant files.",
+        "excl_system_added": "{n} system exclusions added — refresh to apply.",
         "excl_current": "Excluded on this drive:",
         "excl_refresh_hint": "🔄 Refresh the drive to apply exclusions.",
         "excl_none": "No exclusions on this drive.",
@@ -1472,6 +1482,10 @@ with st.sidebar:
         skip_cloud = st.checkbox(
             t("skip_cloud_label"), value=True, help=t("skip_cloud_help"),
         )
+        skip_system = st.checkbox(
+            t("skip_system_label"), value=True,
+            help=t("skip_system_help", names=", ".join(SYSTEM_EXCLUDE_DIRS)),
+        )
         submitted = st.form_submit_button(
             t("index_button"), type="primary",
             disabled=proc_running or bool(_busy_procs),
@@ -1485,6 +1499,13 @@ with st.sidebar:
             label = (new_label.strip()
                      or Path(expanded.rstrip("/")).name
                      or "drive")
+            if skip_system:
+                # seed the exclusions BEFORE the indexer starts: both engines
+                # read the db's exclusion list at walk time, and a fresh index
+                # wipes entries/snapshots/drive but preserves exclusions.
+                _db_out = DB_DIR / f"{label}.db"
+                _existing = get_exclusions(_db_out) if _db_out.exists() else []
+                set_exclusions(_db_out, _existing + SYSTEM_EXCLUDE_DIRS)
             start_indexer(expanded, label, do_full, one_fs, skip_cloud)
             st.rerun()
 
@@ -2418,6 +2439,14 @@ with tab_map:
                 set_exclusions(selected_db, _excl + [_new])
                 st.toast(t("excl_added"), icon="🚫")
                 st.rerun()
+        _sys_missing = [d for d in SYSTEM_EXCLUDE_DIRS if d not in _excl]
+        if st.button(t("excl_system_btn"), key="excl_system_btn",
+                     disabled=not _sys_missing,
+                     help=t("excl_system_help",
+                            names=", ".join(SYSTEM_EXCLUDE_DIRS))):
+            set_exclusions(selected_db, _excl + _sys_missing)
+            st.toast(t("excl_system_added", n=len(_sys_missing)), icon="🖥️")
+            st.rerun()
         if _excl:
             st.caption(t("excl_current"))
             for _e in _excl:
