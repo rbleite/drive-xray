@@ -1419,7 +1419,12 @@ with st.sidebar:
 
     # ── self-update from GitHub ────────────────────────────────────────────
     with st.expander(t("upd_title"), expanded=False):
+        import importlib
         import update as _upd
+        # a git pull (from the button below or a terminal) leaves the
+        # previously imported module in memory — reload so the new code
+        # applies without restarting the app
+        _upd = importlib.reload(_upd)
         if st.button(t("upd_check"), key="upd_check", width="stretch"):
             st.session_state["upd_status"] = _upd.check_updates()
         _st = st.session_state.get("upd_status")
@@ -1441,6 +1446,7 @@ with st.sidebar:
     # ── media-catalog launcher ─────────────────────────────────────────────
     with st.expander(t("mc_title"), expanded=False):
         import launcher as _mc
+        _mc = importlib.reload(_mc)  # same staleness concern as update above
         _mc_dir = _mc.find_media_catalog()
         if _mc_dir is None:
             st.caption(t("mc_not_found"))
