@@ -1660,6 +1660,11 @@ with st.sidebar:
         st.caption(f"{t('settings_current_dir')}: `{_cur_dir}`")
 
         st.session_state.setdefault("cfg_db_dir_input", _cur_dir)
+        # a widget's key can only be written BEFORE the widget is
+        # instantiated in the run — apply the folder picked last run here
+        if "cfg_db_dir_picked" in st.session_state:
+            st.session_state["cfg_db_dir_input"] = \
+                st.session_state.pop("cfg_db_dir_picked")
         _dcol1, _dcol2 = st.columns([4, 1])
         _new_dir = _dcol1.text_input(
             t("settings_db_dir"),
@@ -1672,7 +1677,7 @@ with st.sidebar:
             _p = pick_folder_dialog(
                 st.session_state.get("cfg_db_dir_input") or str(Path.home()))
             if _p:
-                st.session_state["cfg_db_dir_input"] = _p
+                st.session_state["cfg_db_dir_picked"] = _p
                 st.rerun()
         _scol1, _scol2 = st.columns(2)
         if _scol1.button(t("settings_save"), width="stretch",
