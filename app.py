@@ -452,6 +452,10 @@ TRANSLATIONS = {
         "tag_search_col_note": "Nota",
         "tag_search_empty": "Nenhuma pasta etiquetada encontrada.",
         "tag_search_no_tags": "Ainda não existem etiquetas em nenhuma drive. Usa o tab Mapa para etiquetar pastas.",
+        "tag_search_export": "⬇️ Exportar localizações (CSV)",
+        "tag_search_export_help": "Exporta os resultados atuais (escreve uma etiqueta, p.ex. Artigo1, para exportar só essa) com a localização completa em cada drive.",
+        "tag_search_col_root": "Raiz da drive",
+        "tag_search_col_loc": "Localização",
         # cleanup
         "cleanup_title": "🧽 Assistente de limpeza",
         "cleanup_caption": "Gera um script shell com as remoções/movimentos sugeridos. **Não apaga nada automaticamente** — revê e corre manualmente.",
@@ -770,6 +774,10 @@ TRANSLATIONS = {
         "tag_search_col_note": "Note",
         "tag_search_empty": "No tagged folders found.",
         "tag_search_no_tags": "No tags exist on any drive yet. Use the Map tab to tag folders.",
+        "tag_search_export": "⬇️ Export locations (CSV)",
+        "tag_search_export_help": "Exports the current results (type a tag, e.g. Artigo1, to export just that one) with the full location on each drive.",
+        "tag_search_col_root": "Drive root",
+        "tag_search_col_loc": "Location",
         # cleanup
         "cleanup_title": "🧽 Cleanup assistant",
         "cleanup_caption": "Generates a shell script of suggested removals/moves. **It does NOT delete anything automatically** — review and run manually.",
@@ -1660,6 +1668,11 @@ with st.sidebar:
         st.caption(f"{t('settings_current_dir')}: `{_cur_dir}`")
 
         st.session_state.setdefault("cfg_db_dir_input", _cur_dir)
+        # a widget's key can only be written BEFORE the widget is
+        # instantiated in the run — apply the folder picked last run here
+        if "cfg_db_dir_picked" in st.session_state:
+            st.session_state["cfg_db_dir_input"] = \
+                st.session_state.pop("cfg_db_dir_picked")
         _dcol1, _dcol2 = st.columns([4, 1])
         _new_dir = _dcol1.text_input(
             t("settings_db_dir"),
@@ -1672,7 +1685,7 @@ with st.sidebar:
             _p = pick_folder_dialog(
                 st.session_state.get("cfg_db_dir_input") or str(Path.home()))
             if _p:
-                st.session_state["cfg_db_dir_input"] = _p
+                st.session_state["cfg_db_dir_picked"] = _p
                 st.rerun()
         _scol1, _scol2 = st.columns(2)
         if _scol1.button(t("settings_save"), width="stretch",
@@ -2738,6 +2751,32 @@ with tab_compare:
                     t("tag_search_col_note"): r.get("note", ""),
                 } for r in _ts_results],
                 width="stretch", hide_index=True,
+            )
+            # export the current results with the full location on each
+            # drive (root as stored at index time + tagged folder path)
+            _ts_rows = []
+            for r in _ts_results:
+                _root = str(
+                    _reg_entries.get(r["db"].resolve(), {}).get("root", ""))
+                _sep = "\\" if ("\\" in _root or ":" in _root[:2]) else "/"
+                _loc = (_root.rstrip("/\\") + _sep + r["rel_path"]
+                        if _root else r["rel_path"])
+                _ts_rows.append({
+                    t("tag_search_col_drive"): r["label"],
+                    t("tag_search_col_root"): _root,
+                    t("tag_search_col_path"): r["rel_path"],
+                    t("tag_search_col_loc"): _loc,
+                    t("tag_search_col_tags"): " · ".join(r["tags"]),
+                    t("tag_search_col_note"): r.get("note", ""),
+                })
+            # utf-8-sig so Excel opens accented paths correctly
+            _ts_csv = pd.DataFrame(_ts_rows).to_csv(index=False)
+            _ts_slug = "".join(
+                c if c.isalnum() else "-" for c in _ts_query.strip()) or "all"
+            st.download_button(
+                t("tag_search_export"), _ts_csv.encode("utf-8-sig"),
+                file_name=f"xray-tags-{_ts_slug}.csv", mime="text/csv",
+                help=t("tag_search_export_help"), key="tag_search_export",
             )
         else:
             st.info(t("tag_search_empty"))
