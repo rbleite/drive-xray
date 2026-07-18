@@ -16,7 +16,9 @@ from pathlib import Path
 from drive_xray import read_config, write_config
 
 REPO_DIR = Path(__file__).resolve().parent
-DEFAULT_PORT = 8502
+# 8503 matches media-catalog's own run/start scripts. Do not fall back to
+# 8502 — other local apps live there and would be mistaken for media-catalog.
+DEFAULT_PORT = 8503
 
 # where to look when no path is configured yet
 _CANDIDATES = (
@@ -31,7 +33,7 @@ _CANDIDATES = (
 
 def _candidate_ports() -> list[int]:
     """Ports media-catalog may answer on, most likely first: the configured
-    one, then 8503 (its own run/start scripts) and 8502 (our fallback)."""
+    media_catalog_port, then the default."""
     ports: list[int] = []
     try:
         cfg = read_config().get("media_catalog_port")
@@ -39,9 +41,8 @@ def _candidate_ports() -> list[int]:
             ports.append(int(cfg))
     except Exception:
         pass
-    for p in (8503, DEFAULT_PORT):
-        if p not in ports:
-            ports.append(p)
+    if DEFAULT_PORT not in ports:
+        ports.append(DEFAULT_PORT)
     return ports
 
 
