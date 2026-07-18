@@ -93,7 +93,15 @@ def _entry_command(folder: Path, port: int) -> list[str] | None:
                 return ["bash", str(folder / name)]
     for name in ("app.py", "streamlit_app.py", "Home.py", "main.py"):
         if (folder / name).exists():
-            return [sys.executable, "-m", "streamlit", "run", name,
+            # prefer the project's own venv (it has the project's deps);
+            # only fall back to our interpreter when there is none
+            py = sys.executable
+            for cand in (folder / ".venv" / "bin" / "python",
+                         folder / ".venv" / "Scripts" / "python.exe"):
+                if cand.exists():
+                    py = str(cand)
+                    break
+            return [py, "-m", "streamlit", "run", name,
                     "--server.port", str(port), "--server.headless", "true"]
     return None
 
