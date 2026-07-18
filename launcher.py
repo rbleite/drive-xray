@@ -29,11 +29,28 @@ _CANDIDATES = (
 )
 
 
-def get_port() -> int:
+def _candidate_ports() -> list[int]:
+    """Ports media-catalog may answer on, most likely first: the configured
+    one, then 8503 (its own run/start scripts) and 8502 (our fallback)."""
+    ports: list[int] = []
     try:
-        return int(read_config().get("media_catalog_port", DEFAULT_PORT))
+        cfg = read_config().get("media_catalog_port")
+        if cfg:
+            ports.append(int(cfg))
     except Exception:
-        return DEFAULT_PORT
+        pass
+    for p in (8503, DEFAULT_PORT):
+        if p not in ports:
+            ports.append(p)
+    return ports
+
+
+def running_port() -> int | None:
+    """The port media-catalog is currently answering on, or None."""
+    for p in _candidate_ports():
+        if is_running(p):
+            return p
+    return None
 
 
 def find_media_catalog() -> Path | None:
@@ -80,12 +97,15 @@ def _entry_command(folder: Path, port: int) -> list[str] | None:
     return None
 
 
-def launch(folder: Path, port: int, wait: float = 20.0) -> dict:
-    """Start media-catalog detached and wait until its port answers.
-    Returns {ok, message}."""
-    if is_running(port):
-        return {"ok": True, "message": "já está a correr"}
-    cmd = _entry_command(folder, port)
+def launch(folder: Path, wait: float = 20.0) -> dict:
+    """Start media-catalog detached and wait until one of its likely ports
+    answers (its own start script may pick a different port than ours).
+    Returns {ok, message, port}."""
+    port = running_port()
+    if port:
+        return {"ok": True, "message": "já está a correr", "port": port}
+    ports = _candidate_ports()
+    cmd = _entry_command(folder, ports[0])
     if cmd is None:
         return {"ok": False,
                 "message": "sem entrypoint conhecido (start.sh, run.sh, app.py…)"}
@@ -104,13 +124,15 @@ def launch(folder: Path, port: int, wait: float = 20.0) -> dict:
         return {"ok": False, "message": f"falhou a arrancar: {e}"[:300]}
     deadline = time.monotonic() + wait
     while time.monotonic() < deadline:
-        if is_running(port):
-            return {"ok": True, "message": "arrancado"}
+        port = running_port()
+        if port:
+            return {"ok": True, "message": "arrancado", "port": port}
         if proc.poll() is not None:
             return {"ok": False,
                     "message": f"o processo terminou (código {proc.returncode})"
                                f" — vê {log.name}"}
         time.sleep(0.5)
+    _ports = "/".join(str(p) for p in ports)
     return {"ok": False,
-            "message": f"não respondeu na porta {port} em {int(wait)}s"
+            "message": f"não respondeu nas portas {_ports} em {int(wait)}s"
                        f" — vê {log.name}"}

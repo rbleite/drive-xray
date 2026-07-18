@@ -1454,17 +1454,18 @@ with st.sidebar:
                 _mc.save_media_catalog_dir(_typed)
                 st.rerun()
         else:
-            _mc_port = _mc.get_port()
-            _mc_url = f"http://localhost:{_mc_port}"
             st.caption(f"`{_mc_dir}`")
-            if _mc.is_running(_mc_port):
+            _mc_port = _mc.running_port()
+            if _mc_port:
+                _mc_url = f"http://localhost:{_mc_port}"
                 st.success(t("mc_running", url=_mc_url))
                 st.link_button(t("mc_open"), _mc_url, width="stretch")
             elif st.button(t("mc_launch"), type="primary", key="mc_launch",
                            width="stretch"):
                 with st.spinner(t("mc_launching")):
-                    _mc_res = _mc.launch(_mc_dir, _mc_port)
+                    _mc_res = _mc.launch(_mc_dir)
                 if _mc_res.get("ok"):
+                    _mc_url = f"http://localhost:{_mc_res['port']}"
                     st.success(t("mc_started", url=_mc_url))
                     st.link_button(t("mc_open"), _mc_url, width="stretch")
                 else:
