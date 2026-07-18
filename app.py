@@ -833,18 +833,28 @@ from drive_xray import stage_for_write as _stage_for_write
 
 
 def _log_path(db: Path) -> Path:
-    """Persistent log of the last index/refresh/snapshot of this drive —
-    lives next to the .db so it survives closed tabs and app restarts."""
+    """Persistent log of the last index/refresh/snapshot of this drive — it
+    survives closed tabs and app restarts. For a db inside a cloud-synced
+    folder the log lives in the local staging dir instead of next to the db:
+    it is flushed line-by-line during the whole operation, and next to the
+    db it kept the sync client permanently busy re-uploading it."""
+    from drive_xray import _path_in_cloud_dir
+    if _path_in_cloud_dir(db):
+        _STAGING_DIR.mkdir(parents=True, exist_ok=True)
+        return _STAGING_DIR / (db.name + ".log")
     return Path(str(db) + ".log")
 
 
 def _log_tail(db: Path, n: int = 20) -> list[str]:
-    try:
-        lines = _log_path(db).read_text(
-            encoding="utf-8", errors="replace").splitlines()
-        return [l for l in lines if l.strip()][-n:]
-    except OSError:
-        return []
+    # prefer the current location; fall back to the legacy next-to-db spot
+    for cand in (_log_path(db), Path(str(db) + ".log")):
+        try:
+            lines = cand.read_text(
+                encoding="utf-8", errors="replace").splitlines()
+            return [l for l in lines if l.strip()][-n:]
+        except OSError:
+            continue
+    return []
 
 
 def _spawn(cmd: list[str], label: str, db: Path,
@@ -1344,12 +1354,15 @@ def build_xlsx(rows: list[dict]) -> bytes:
 
 
 def delete_db_files(target: Path) -> None:
-    """Remove the .db plus any -wal/-shm/-journal/.log sidecars, and deregister."""
+    """Remove the .db plus any -wal/-shm/-journal/.log sidecars (including
+    leftovers in the local staging dir), and deregister."""
     registry_remove(target)
     target.unlink(missing_ok=True)
-    for ext in ("-wal", "-shm", "-journal", ".log"):
-        sib = Path(str(target) + ext)
-        sib.unlink(missing_ok=True)
+    for base in (target, _STAGING_DIR / target.name):
+        for ext in ("", "-wal", "-shm", "-journal", ".log"):
+            if base == target and ext == "":
+                continue  # already removed above
+            Path(str(base) + ext).unlink(missing_ok=True)
 
 
 # ---------- sidebar ----------

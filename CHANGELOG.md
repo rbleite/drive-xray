@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] — 2026-07-18
+
 ### Fixed
+- The per-operation log (`<db>.log`) of a cloud-synced drive now lives in
+  the local staging dir instead of next to the `.db` — it is flushed
+  line-by-line for the whole operation and kept the sync client
+  permanently re-uploading it.
 - Cross-OS refresh of exFAT drives re-hashed every file: exFAT stores
   local time, so the same untouched file can appear shifted by whole
   hours between macOS and Windows (timezone/DST interpretation), which
