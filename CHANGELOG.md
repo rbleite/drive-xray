@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timestamp granularity). Size must still match exactly.
 
 ### Added
+- Local staging for cloud-synced `.db` files: when the index folder lives
+  in OneDrive/Google Drive/Dropbox (the recommended multi-machine setup),
+  the sync client used to re-upload the ever-changing `.db`/`-wal`
+  continuously WHILE an index/refresh wrote it, stealing disk and network
+  bandwidth from the operation. The app now copies the db to a local
+  staging dir (`~/.drive-xray-staging`), lets the indexer write there, and
+  moves the finished file back — one single upload at the end. A staged
+  copy left by an interrupted run is reused (checkpoint resume). Disable
+  with `DRIVE_XRAY_NO_STAGING=1`.
 - One-click "ignore system folders" exclusion set (`Windows`,
   `Program Files`, `Program Files (x86)`, `ProgramData`, `AppData`,
   `node_modules`, `PerfLogs`, `Recovery`, `$WinREAgent`): a default-on

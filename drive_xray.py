@@ -89,6 +89,84 @@ def is_cloud_dir(name: str) -> bool:
     return any(n.startswith(p) for p in CLOUD_DIR_PREFIXES)
 
 
+# ---------- local staging for cloud-synced .db files ----------
+#
+# When the .db lives inside a cloud-synced folder (OneDrive / Google Drive /
+# Dropbox — the recommended multi-machine setup), the sync client re-uploads
+# the ever-changing .db/-wal continuously WHILE an index/refresh writes it,
+# stealing disk and network bandwidth from the operation itself. Instead:
+# copy the db to a local (non-synced) staging dir, let the indexer write
+# there, and move the finished file back — one single upload at the end.
+
+STAGING_DIR = Path.home() / ".drive-xray-staging"
+
+
+def _path_in_cloud_dir(p: Path) -> bool:
+    try:
+        return any(is_cloud_dir(part) for part in Path(p).resolve().parts)
+    except OSError:
+        return False
+
+
+def _wal_checkpoint_file(db: Path) -> None:
+    """Fold -wal into the .db so a plain file copy/move carries every commit."""
+    try:
+        conn = sqlite3.connect(db, isolation_level=None)
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.close()
+    except Exception:
+        pass
+
+
+def _drop_db_sidecars(db: Path) -> None:
+    for ext in ("-wal", "-shm", "-journal"):
+        Path(str(db) + ext).unlink(missing_ok=True)
+
+
+def stage_for_write(db: Path) -> tuple[Path, bool]:
+    """Return (path_the_indexer_should_write, staged?). Staging only kicks in
+    for dbs inside a cloud-synced folder; set DRIVE_XRAY_NO_STAGING=1 to
+    disable. A staged copy left behind by an interrupted run is reused so the
+    incremental checkpointing can resume instead of starting over."""
+    if os.environ.get("DRIVE_XRAY_NO_STAGING", "").lower() in {"1", "true", "yes"}:
+        return db, False
+    if not _path_in_cloud_dir(db):
+        return db, False
+    STAGING_DIR.mkdir(parents=True, exist_ok=True)
+    staged = STAGING_DIR / db.name
+    try:
+        if staged.exists() and (not db.exists()
+                                or staged.stat().st_mtime >= db.stat().st_mtime):
+            pass  # leftover from an interrupted run — resume from it
+        elif db.exists():
+            _wal_checkpoint_file(db)
+            _drop_db_sidecars(staged)
+            shutil.copy2(db, staged)
+        else:
+            staged.unlink(missing_ok=True)
+            _drop_db_sidecars(staged)
+    except OSError:
+        return db, False   # staging unavailable — write in place as before
+    return staged, True
+
+
+def finalize_staged(staged: Path, db: Path) -> str:
+    """Move the finished staged db back into the cloud folder (single upload).
+    Retries a few times — sync clients briefly lock files they are scanning."""
+    _wal_checkpoint_file(staged)
+    _drop_db_sidecars(staged)
+    last_err = ""
+    for attempt in range(5):
+        try:
+            _drop_db_sidecars(db)
+            shutil.move(str(staged), str(db))
+            return f"moved to {db}"
+        except OSError as e:
+            last_err = str(e)
+            time.sleep(2 * (attempt + 1))
+    return f"could not move back ({last_err}) — db kept at {staged}"
+
+
 # ---------------------------------------------------------------------------
 # Auto-tag rules — map sets of file extensions to a human label.
 #
