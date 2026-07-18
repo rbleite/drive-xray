@@ -45,7 +45,7 @@ READ_CHUNK = 1024 * 1024
 # v1 = head + tail; v2 = head + middle + tail (defends against bio formats like
 # BAM/VCF where header/footer are stable but body varies).
 HASH_VERSION = 2
-DX_VERSION = "1.4.0"
+DX_VERSION = "1.4.1"
 SCHEMA_VERSION = 6  # see _migrate_to_v6 / SCHEMA constant below
 SKIP_DIR_NAMES = {
     ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems",
