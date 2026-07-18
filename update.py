@@ -32,6 +32,20 @@ def has_remote() -> bool:
     return bool(r and r.returncode == 0 and r.stdout.strip())
 
 
+def _upstream() -> tuple[str, str]:
+    """(remote, branch) to pull from: the configured upstream when there is
+    one, otherwise the remote's default branch, otherwise origin/main."""
+    up = _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+    if up and up.returncode == 0 and "/" in up.stdout.strip():
+        remote, _, branch = up.stdout.strip().partition("/")
+        return remote, branch
+    head = _git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+    if head and head.returncode == 0 and "/" in head.stdout.strip():
+        remote, _, branch = head.stdout.strip().partition("/")
+        return remote, branch
+    return "origin", "main"
+
+
 def check_updates() -> dict:
     """Fetch and compare HEAD with the upstream. Returns dict with:
     {ok, behind, ahead, commits:[str], error}."""
@@ -42,9 +56,8 @@ def check_updates() -> dict:
     fetch = _git(["fetch", "--quiet"], timeout=60)
     if fetch is None or fetch.returncode != 0:
         return {"ok": False, "error": "git fetch falhou (rede/SSH?)"}
-    # upstream ref
-    up = _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
-    upstream = up.stdout.strip() if up and up.returncode == 0 else "origin/main"
+    remote, branch = _upstream()
+    upstream = f"{remote}/{branch}"
     counts = _git(["rev-list", "--left-right", "--count", f"HEAD...{upstream}"])
     behind = ahead = 0
     if counts and counts.returncode == 0:
@@ -66,9 +79,12 @@ def apply_update() -> dict:
     if not is_git_clone() or not has_remote():
         return {"ok": False, "message": "sem git/remoto"}
     before = _git(["rev-parse", "HEAD"])
-    pull = _git(["pull", "--ff-only"], timeout=120)
+    remote, branch = _upstream()
+    pull = _git(["pull", "--ff-only", remote, branch], timeout=120)
     if pull is None or pull.returncode != 0:
         return {"ok": False, "message": (pull.stderr if pull else "pull falhou")[:300]}
+    # remember the upstream so plain `git pull` also works from now on
+    _git(["branch", "--set-upstream-to", f"{remote}/{branch}"])
     after = _git(["rev-parse", "HEAD"])
     if before and after and before.stdout == after.stdout:
         return {"ok": True, "pulled": False, "message": "já estava atualizado"}

@@ -393,6 +393,15 @@ TRANSLATIONS = {
         "upd_available": "🆕 {n} atualização(ões) disponível(eis):",
         "upd_apply": "⬇️ Atualizar agora",
         "upd_applying": "A atualizar…",
+        "mc_title": "🎬 Media Catalog",
+        "mc_running": "✅ A correr em {url}",
+        "mc_open": "↗️ Abrir Media Catalog",
+        "mc_launch": "▶️ Arrancar Media Catalog",
+        "mc_launching": "A arrancar…",
+        "mc_started": "✅ Arrancado — abre {url}",
+        "mc_not_found": "Pasta do media-catalog não encontrada nesta máquina.",
+        "mc_pick": "📁 Escolher pasta do media-catalog",
+        "mc_or_type": "…ou escreve o caminho",
         "excl_title": "🚫 Excluir pastas da indexação",
         "excl_caption": "Pastas que NÃO queres indexar. Escreve um **nome** (`node_modules`) para excluir em qualquer nível, um **padrão** (`*cache*`, `*Extras*`), ou um **caminho** (`Series/Extras`) a partir da raiz. Aplicam-se no próximo refresh.",
         "excl_add": "Escolher pasta a excluir",
@@ -702,6 +711,15 @@ TRANSLATIONS = {
         "upd_available": "🆕 {n} update(s) available:",
         "upd_apply": "⬇️ Update now",
         "upd_applying": "Updating…",
+        "mc_title": "🎬 Media Catalog",
+        "mc_running": "✅ Running at {url}",
+        "mc_open": "↗️ Open Media Catalog",
+        "mc_launch": "▶️ Start Media Catalog",
+        "mc_launching": "Starting…",
+        "mc_started": "✅ Started — open {url}",
+        "mc_not_found": "media-catalog folder not found on this machine.",
+        "mc_pick": "📁 Pick the media-catalog folder",
+        "mc_or_type": "…or type the path",
         "excl_title": "🚫 Exclude folders from indexing",
         "excl_caption": "Folders you do NOT want indexed. Type a **name** (`node_modules`) to exclude at any depth, a **pattern** (`*cache*`, `*Extras*`), or a **path** (`Series/Extras`) from the root. Applied on the next refresh.",
         "excl_add": "Pick a folder to exclude",
@@ -1419,6 +1437,38 @@ with st.sidebar:
                         _res = _upd.apply_update()
                     (st.success if _res.get("ok") else st.error)(_res.get("message"))
                     st.session_state.pop("upd_status", None)
+
+    # ── media-catalog launcher ─────────────────────────────────────────────
+    with st.expander(t("mc_title"), expanded=False):
+        import launcher as _mc
+        _mc_dir = _mc.find_media_catalog()
+        if _mc_dir is None:
+            st.caption(t("mc_not_found"))
+            if st.button(t("mc_pick"), key="mc_pick", width="stretch"):
+                _p = pick_folder_dialog()
+                if _p:
+                    _mc.save_media_catalog_dir(_p)
+                    st.rerun()
+            _typed = st.text_input(t("mc_or_type"), key="mc_path_typed")
+            if _typed and Path(_typed).expanduser().is_dir():
+                _mc.save_media_catalog_dir(_typed)
+                st.rerun()
+        else:
+            _mc_port = _mc.get_port()
+            _mc_url = f"http://localhost:{_mc_port}"
+            st.caption(f"`{_mc_dir}`")
+            if _mc.is_running(_mc_port):
+                st.success(t("mc_running", url=_mc_url))
+                st.link_button(t("mc_open"), _mc_url, width="stretch")
+            elif st.button(t("mc_launch"), type="primary", key="mc_launch",
+                           width="stretch"):
+                with st.spinner(t("mc_launching")):
+                    _mc_res = _mc.launch(_mc_dir, _mc_port)
+                if _mc_res.get("ok"):
+                    st.success(t("mc_started", url=_mc_url))
+                    st.link_button(t("mc_open"), _mc_url, width="stretch")
+                else:
+                    st.error(_mc_res.get("message"))
 
     # whether an indexer/refresher is currently running (this session)
     proc_running = (
