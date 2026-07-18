@@ -239,6 +239,9 @@ TRANSLATIONS = {
         "main_welcome_title": "drive-xray",
         "main_welcome_body": "Indexa o teu Mac ou drives externas, encontra ficheiros e pastas duplicados, compara drives offline.\n\nComeça por **indexar uma drive** na barra lateral.",
         "no_metadata_error": "`{name}` não contém metadados de drive. Re-indexa.",
+        "db_cloud_placeholder": "☁️ `{name}` ainda está na cloud (OneDrive/iCloud) e não foi descarregado para este Mac. No Finder, clica-direito no ficheiro → **«Manter sempre neste dispositivo»**, espera o download acabar e tenta de novo. **Não é preciso re-indexar.**",
+        "db_partial_sync": "⚠️ `{name}` parece incompleto — provavelmente a sincronização (OneDrive) ainda está a meio, ou foi interrompida. Espera a sincronização terminar (ícone da nuvem sem atividade) e tenta de novo. **Não é preciso re-indexar** — o índice no outro computador está intacto.",
+        "db_retry": "🔄 Tentar de novo",
         "drive_busy": "⏳ `{name}` está ocupada — indexação/refresh em curso. Os dados estão intactos; espera que termine.",
         "drive_busy_retry": "🔄 Tentar de novo",
         "drive_indexing": "⏳ a indexar… (PID {pid})",
@@ -561,6 +564,9 @@ TRANSLATIONS = {
         "main_welcome_title": "drive-xray",
         "main_welcome_body": "Index your Mac or external drives, find duplicate files and folders, compare drives offline.\n\nStart by **indexing a drive** in the sidebar.",
         "no_metadata_error": "`{name}` has no drive metadata. Please re-index.",
+        "db_cloud_placeholder": "☁️ `{name}` is still in the cloud (OneDrive/iCloud) and has not been downloaded to this Mac. In Finder, right-click the file → **\"Always Keep on This Device\"**, wait for the download, then try again. **No re-index needed.**",
+        "db_partial_sync": "⚠️ `{name}` looks incomplete — most likely the sync (OneDrive) is still in progress or was interrupted. Wait for sync to finish (cloud icon idle) and try again. **No re-index needed** — the index on the other machine is intact.",
+        "db_retry": "🔄 Try again",
         "drive_busy": "⏳ `{name}` is busy — an index/refresh is in progress. Your data is intact; wait for it to finish.",
         "drive_busy_retry": "🔄 Try again",
         "drive_indexing": "⏳ indexing… (PID {pid})",
@@ -1085,6 +1091,34 @@ def drive_info(db: Path) -> dict | str | None:
     d["snapshot_id"] = sid
     d["n_snapshots"] = n_snapshots
     return d
+
+
+def _db_problem(db: Path) -> str:
+    """Why did drive_info() come back empty? Distinguishes cloud-sync issues
+    (common in the OneDrive multi-machine setup) from a genuinely empty db,
+    so the UI stops telling people to re-index a perfectly good drive.
+    Returns 'cloud_placeholder' | 'partial_sync' | 'no_metadata'."""
+    try:
+        stt = db.stat()
+        # dataless File Provider placeholder (OneDrive/iCloud on macOS):
+        # full logical size but no blocks materialized on disk
+        if stt.st_size == 0 or getattr(stt, "st_blocks", 1) == 0:
+            return "cloud_placeholder"
+        with open(db, "rb") as fh:
+            hdr = fh.read(32)
+    except OSError:
+        return "cloud_placeholder"
+    if hdr[:16] != b"SQLite format 3\x00":
+        return "partial_sync"   # half-synced / truncated copy — not a database
+    # a valid header also declares the database size — a file shorter than
+    # declared is a truncated (still-syncing) copy, not a bad index
+    page_size = int.from_bytes(hdr[16:18], "big")
+    if page_size == 1:
+        page_size = 65536
+    page_count = int.from_bytes(hdr[28:32], "big")
+    if page_count and stt.st_size < page_size * page_count:
+        return "partial_sync"
+    return "no_metadata"        # valid sqlite, but no drive row: re-index
 
 
 def _treemap_precompute(db: Path):
@@ -1890,7 +1924,15 @@ if info == DRIVE_LOCKED:
         st.rerun()
     st.stop()
 if info is None:
-    st.error(t("no_metadata_error", name=selected_db.name))
+    _why = _db_problem(selected_db)
+    if _why == "cloud_placeholder":
+        st.warning(t("db_cloud_placeholder", name=selected_db.name))
+    elif _why == "partial_sync":
+        st.warning(t("db_partial_sync", name=selected_db.name))
+    else:
+        st.error(t("no_metadata_error", name=selected_db.name))
+    if _why != "no_metadata" and st.button(t("db_retry"), key="db_retry_btn"):
+        st.rerun()
     st.stop()
 
 st.title(f"💾 {info['label']}")
