@@ -5,6 +5,7 @@ Run with:  streamlit run app.py
 """
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import shutil
@@ -20,6 +21,17 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent))
 import pandas as pd
+
+# After an update (the sidebar button or a git pull) with the app still
+# running, Streamlit re-executes this file but `import` returns the module
+# already in memory, so names that only exist in the new code raise
+# ImportError. Reload drive_xray when its file on disk changed since import.
+import drive_xray as _dx_mod
+_dx_mtime = os.path.getmtime(_dx_mod.__file__)
+if getattr(_dx_mod, "_loaded_mtime", None) != _dx_mtime:
+    _dx_mod = importlib.reload(_dx_mod)
+    _dx_mod._loaded_mtime = _dx_mtime
+del _dx_mod, _dx_mtime
 
 from drive_xray import (
     open_db, fill_full_hashes, compute_dir_hashes, human,
@@ -1419,7 +1431,6 @@ with st.sidebar:
 
     # ── self-update from GitHub ────────────────────────────────────────────
     with st.expander(t("upd_title"), expanded=False):
-        import importlib
         import update as _upd
         # a git pull (from the button below or a terminal) leaves the
         # previously imported module in memory — reload so the new code
