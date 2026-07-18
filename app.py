@@ -824,6 +824,14 @@ def t(key: str, **fmt) -> str:
 
 # ---------- subprocess: indexer ----------
 
+# Local staging for .db files that live inside a cloud-synced folder — see
+# stage_for_write/finalize_staged in drive_xray.py. Imported there so the
+# logic is unit-testable without Streamlit.
+from drive_xray import STAGING_DIR as _STAGING_DIR
+from drive_xray import finalize_staged as _finalize_staged
+from drive_xray import stage_for_write as _stage_for_write
+
+
 def _log_path(db: Path) -> Path:
     """Persistent log of the last index/refresh/snapshot of this drive —
     lives next to the .db so it survives closed tabs and app restarts."""
@@ -839,13 +847,18 @@ def _log_tail(db: Path, n: int = 20) -> list[str]:
         return []
 
 
-def _spawn(cmd: list[str], label: str, db: Path) -> None:
+def _spawn(cmd: list[str], label: str, db: Path,
+           staged: Path | None = None) -> None:
     """Launch a long-running CLI subprocess. Output streams into
     st.session_state.idx_log AND into <db>.log, so progress can still be
-    followed after the browser tab (and its session log) is gone."""
+    followed after the browser tab (and its session log) is gone.
+    When `staged` is set, the indexer is writing a local staging copy; on
+    success it is moved back over `db` (one cloud upload instead of many)."""
     try:
         lf = open(_log_path(db), "w", encoding="utf-8", errors="replace")
         lf.write("$ " + " ".join(cmd) + "\n")
+        if staged:
+            lf.write(f"[staging: writing {staged}, will move to {db} when done]\n")
         lf.flush()
     except OSError:
         lf = None
@@ -855,21 +868,29 @@ def _spawn(cmd: list[str], label: str, db: Path) -> None:
     )
     log: list[str] = []
 
+    def _logline(piece: str) -> None:
+        log.append(piece)
+        if lf:
+            try:
+                lf.write(piece + "\n")
+                lf.flush()
+            except OSError:
+                pass
+
     def reader():
         for line in iter(proc.stdout.readline, ""):
             for piece in line.replace("\r", "\n").splitlines():
                 if piece.strip():
-                    log.append(piece)
-                    if lf:
-                        try:
-                            lf.write(piece + "\n")
-                            lf.flush()
-                        except OSError:
-                            pass
+                    _logline(piece)
         proc.stdout.close()
+        code = proc.wait()
+        if staged and code == 0:
+            _logline(f"[staging: {_finalize_staged(staged, db)}]")
+        elif staged:
+            _logline(f"[staging: kept at {staged} for resume (exit {code})]")
         if lf:
             try:
-                lf.write(f"[exit {proc.wait()}]\n")
+                lf.write(f"[exit {code}]\n")
                 lf.close()
             except OSError:
                 pass
@@ -883,26 +904,33 @@ def _spawn(cmd: list[str], label: str, db: Path) -> None:
 def start_indexer(root: str, label: str, do_full: bool,
                   one_fs: bool, skip_cloud: bool) -> None:
     db_out = DB_DIR / f"{label}.db"
-    cmd = [*DX_CMD, "index", root, "--label", label, "--db", str(db_out)]
+    target, staged = _stage_for_write(db_out)
+    cmd = [*DX_CMD, "index", root, "--label", label, "--db", str(target)]
     if do_full:
         cmd.append("--full")
     if one_fs:
         cmd.append("--one-filesystem")
     if skip_cloud:
         cmd.append("--skip-cloud")
-    _spawn(cmd, label, db_out)
+    _spawn(cmd, label, db_out, staged=target if staged else None)
 
 
 def start_refresh(db: Path) -> None:
-    _spawn([*DX_CMD, "refresh", str(db)], db.stem, db)
+    target, staged = _stage_for_write(db)
+    _spawn([*DX_CMD, "refresh", str(target)], db.stem, db,
+           staged=target if staged else None)
 
 
 def start_compact(db: Path) -> None:
-    _spawn([*DX_CMD, "compact", str(db)], db.stem, db)
+    target, staged = _stage_for_write(db)
+    _spawn([*DX_CMD, "compact", str(target)], db.stem, db,
+           staged=target if staged else None)
 
 
 def start_snapshot(db: Path) -> None:
-    _spawn([*DX_CMD, "snapshot", "take", str(db)], db.stem, db)
+    target, staged = _stage_for_write(db)
+    _spawn([*DX_CMD, "snapshot", "take", str(target)], db.stem, db,
+           staged=target if staged else None)
 
 
 @st.cache_data(ttl=3, show_spinner=False)
@@ -949,6 +977,13 @@ def _active_index_procs() -> dict:
                     procs[tok] = pid
                 break
     return procs
+
+
+def _busy_pid_for(db: Path, procs: dict) -> int | None:
+    """PID of a live index/refresh writer for this drive — whether it is
+    writing the db in place or its local staging copy (cloud-synced dbs)."""
+    return (procs.get(str(db.resolve()))
+            or procs.get(str((_STAGING_DIR / db.name).resolve())))
 
 
 # ---------- db helpers ----------
@@ -1402,7 +1437,7 @@ with st.sidebar:
             _display_label = _reg.get("label", db.stem)
             is_current = (current_path == str(db))
             # is THIS drive being indexed/refreshed right now?
-            _db_pid = _busy_procs.get(str(db.resolve()))
+            _db_pid = _busy_pid_for(db, _busy_procs)
             _db_busy = _db_pid is not None
             # disable write actions if a process is touching this db (real OS
             # state) or this session spawned one that's still alive.
@@ -1435,7 +1470,7 @@ with st.sidebar:
                 # right before spawning, so a stale render can't launch a
                 # second concurrent writer over a running one.
                 _active_index_procs.clear()
-                if _active_index_procs().get(str(db.resolve())):
+                if _busy_pid_for(db, _active_index_procs()):
                     st.rerun()  # already indexing — refuse silently
                 else:
                     start_refresh(db)
@@ -1753,7 +1788,7 @@ def _render_op_status(db: Path, running: bool) -> None:
 
 
 info = drive_info(selected_db)
-_selected_busy = str(selected_db.resolve()) in _busy_procs
+_selected_busy = _busy_pid_for(selected_db, _busy_procs) is not None
 if info == DRIVE_LOCKED:
     st.info(t("drive_busy", name=selected_db.name))
     _render_op_status(selected_db, running=True)
@@ -1788,7 +1823,7 @@ with tab_summary:
     c4.metric(t("db_size"), human(db_size))
     if st.button(t("compact_button"), help=t("compact_help"),
                  disabled=proc_running
-                 or str(selected_db.resolve()) in _busy_procs):
+                 or _busy_pid_for(selected_db, _busy_procs) is not None):
         start_compact(selected_db)
         st.rerun()
 
@@ -2525,7 +2560,7 @@ with tab_history:
         c1.subheader(t("history_title", n=len(snaps)))
         if c2.button(t("snapshot_button"), type="primary",
                      disabled=proc_running
-                     or str(selected_db.resolve()) in _busy_procs,
+                     or _busy_pid_for(selected_db, _busy_procs) is not None,
                      key="snap_btn_history"):
             start_snapshot(selected_db)
             st.rerun()
