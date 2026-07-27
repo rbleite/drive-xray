@@ -1059,6 +1059,28 @@ def notes_get(db_path: Path, rel_path: str) -> str:
     return data.get("drives", {}).get(key, {}).get("folder_notes", {}).get(rel_path, "")
 
 
+def notes_get_all(db_path: Path) -> dict[str, str]:
+    """Return {rel_path: note} for every noted folder in one query. The UI
+    renders one treemap cell per folder and used to call notes_get() (a fresh
+    sqlite connection) for each — hundreds of connect/query/close per rerun on
+    a large drive. Fetch them all at once and look up in memory instead."""
+    if db_path.exists():
+        try:
+            conn = sqlite3.connect(db_path)
+            rows = conn.execute(
+                "SELECT rel_path, note FROM folder_meta"
+                " WHERE note IS NOT NULL AND note != ''"
+            ).fetchall()
+            conn.close()
+            if rows:
+                return {rp: (nt or "") for rp, nt in rows}
+        except Exception:
+            pass
+    data = _registry_load()
+    key = str(db_path.resolve())
+    return dict(data.get("drives", {}).get(key, {}).get("folder_notes", {}))
+
+
 def tags_set(db_path: Path, rel_path: str, tags: list[str],
              note: str | None = None) -> None:
     """Set tags (and optionally note) for a folder. Empty tags+note removes entry.

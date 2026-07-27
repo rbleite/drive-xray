@@ -45,7 +45,7 @@ from drive_xray import (
     verify_file, execute_file_action, QUARANTINE_DIR, AUDIT_LOG,
     read_config, write_config, get_db_dir, import_folder,
     get_exclusions, set_exclusions, SYSTEM_EXCLUDE_DIRS,
-    tags_get, tags_set, tags_search, notes_get, notes_set,
+    tags_get, tags_set, tags_search, notes_get, notes_get_all, notes_set,
     compute_auto_tags, AUTO_TAGS_YAML_PATH, write_default_auto_tag_rules,
     get_auto_tag_rules,
 )
@@ -199,6 +199,20 @@ def _ss_compute(key: str, fn):
         if key not in st.session_state:  # double-check under lock
             st.session_state[key] = fn()
     return st.session_state[key]
+
+
+def _ss_memo1(slot: str, key, fn):
+    """Single-slot memo: recompute fn() only when `key` changes since the last
+    call for this slot, then cache (key, value) under one session_state entry.
+    Unlike _ss_compute this does NOT accumulate one entry per distinct key —
+    used for slider-driven results (treemap rows) where _ss_compute would leak
+    a cached result per value dragged through."""
+    cached = st.session_state.get(slot)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    val = fn()
+    st.session_state[slot] = (key, val)
+    return val
 
 
 st.set_page_config(page_title="drive-xray", layout="wide", page_icon="💾")
@@ -2326,9 +2340,15 @@ with tab_map:
     _map_pre_key = f"map_pre_{selected_db}"
     with st.spinner(t("calculating")):
         _pre = _ss_compute(_map_pre_key, lambda: _treemap_precompute(selected_db))
-    rows = treemap_rows(selected_db, map_min, map_include_files, _precomputed=_pre)
+    # cache the rows too — they rebuild the ancestor walk in Python on every
+    # rerun (e.g. the 1s index-status loop) unless the inputs are unchanged
+    rows = _ss_memo1(
+        f"map_rows_{selected_db}", (map_min, map_include_files),
+        lambda: treemap_rows(selected_db, map_min, map_include_files,
+                             _precomputed=_pre))
 
     _folder_tags = tags_get(selected_db)
+    _folder_notes = notes_get_all(selected_db)   # one query, not one per cell
 
     # auto-tags — computed from file extensions in latest snapshot, cached by db mtime
     _at_mtime_key = f"_at_mtime_{selected_db}"
@@ -2412,7 +2432,7 @@ with tab_map:
         def _hover_extra(rp):
             tgs = _folder_tags.get(rp, [])
             atgs = _auto_tags.get(rp, [])
-            nt = notes_get(selected_db, rp)
+            nt = _folder_notes.get(rp, "")
             parts = []
             if tgs:
                 parts.append("🏷️ " + " · ".join(tgs))
@@ -2561,7 +2581,7 @@ with tab_map:
                 st.dataframe(
                     [{t("tags_col_path"): p,
                       t("tags_col_tags"): " · ".join(tgs),
-                      t("tags_col_note"): notes_get(selected_db, p)}
+                      t("tags_col_note"): _folder_notes.get(p, "")}
                      for p, tgs in _filtered.items()],
                     width="stretch", hide_index=True,
                 )
