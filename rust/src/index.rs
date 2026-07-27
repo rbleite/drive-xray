@@ -7,7 +7,7 @@
 
 use crate::db;
 use crate::hash;
-use crate::util::i64_wrap;
+use crate::util::{self, i64_wrap};
 use crate::walker::{self, RawEntry};
 use crate::HASH_VERSION;
 use anyhow::{anyhow, Context, Result};
@@ -89,7 +89,10 @@ pub fn build_reuse_cache(conn: &Connection) -> Result<ReuseCache> {
         let mtime = match mtime { Some(m) => m, None => continue };
         let partial = partial.and_then(|v| <[u8; 16]>::try_from(v.as_slice()).ok());
         let full = full.and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok());
-        cache.insert(rp, ReuseEntry { size, mtime, partial, full });
+        // key by NFC so a file indexed on one OS (NFD on macOS) matches the
+        // same file re-walked on another (NFC on Windows). Stored rel_path is
+        // untouched; only this in-memory lookup key is folded.
+        cache.insert(util::nfc(&rp), ReuseEntry { size, mtime, partial, full });
     }
     Ok(cache)
 }
@@ -330,7 +333,7 @@ fn hash_update_phase(
                 //    (see mtimes_equivalent: FAT granularity + exFAT
                 //    local-time hour shifts between OSes)
                 if let Some(cache) = reuse {
-                    if let Some(c) = cache.get(&e.rel_path) {
+                    if let Some(c) = cache.get(&util::nfc(&e.rel_path)) {
                         if c.size == size
                             && mtimes_equivalent(c.mtime, e.mtime.unwrap_or(0.0))
                         {

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Cross-OS Unicode normalization (macOS NFD ↔ Windows/Linux NFC). The same
+  file has different rel_path bytes depending on the OS that indexed it,
+  which silently broke every rel_path-keyed comparison across a Mac↔Windows
+  sync: `refresh` re-hashed every accented file (reuse-cache miss),
+  `diff` reported phantom delete+add pairs for unchanged files, and
+  `resolve_root` could fail to recognize a volume with accented top-level
+  names ("not mounted"). All three now fold rel_path through NFC for
+  comparison in both engines. Stored rel_path bytes are deliberately left
+  untouched, so a path reconstructed for I/O still opens on
+  normalization-sensitive filesystems (exFAT/FAT). No re-index needed.
+
+### Performance
+- The Map tab rebuilt the treemap rows on every rerun and opened a fresh
+  SQLite connection per treemap cell (and per tagged-folder row) to fetch
+  its note — hundreds of connect/query/close per rerun on a large drive,
+  repeated every second during an index. Folder notes are now fetched once
+  per rerun in a single query, and the treemap rows are memoized until the
+  size/include-files inputs change.
+
 ## [1.4.1] — 2026-07-18
 
 ### Fixed

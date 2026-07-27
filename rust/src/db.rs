@@ -775,16 +775,33 @@ fn root_fingerprint(conn: &Connection) -> (Vec<String>, Vec<(String, i64)>) {
 
 /// (name_hits, file_hits) for a candidate mount point. A file only counts
 /// when it exists at the sampled rel_path with the exact size.
+///
+/// A rel_path stored on one OS (NFD on macOS) is probed against a volume now
+/// mounted on another (NFC on disk): try the exact stored bytes first, then
+/// the NFC-folded form, so the sample matches whether the live filesystem is
+/// normalization-insensitive (APFS/HFS+) or -sensitive (exFAT/NTFS). Without
+/// this a genuinely-present volume with accented top-level names fails the
+/// fingerprint and is reported "not mounted".
 fn score_base(base: &Path, names: &[String], files: &[(String, i64)]) -> (usize, usize) {
-    let name_hits = names.iter().filter(|n| base.join(n).exists()).count();
-    let file_hits = files
-        .iter()
-        .filter(|(rp, sz)| {
-            std::fs::metadata(base.join(rp))
-                .map(|md| md.is_file() && md.len() as i64 == *sz)
+    let exists = |rel: &str| {
+        base.join(rel).exists() || {
+            let n = crate::util::nfc(rel);
+            n != rel && base.join(&n).exists()
+        }
+    };
+    let size_matches = |rel: &str, sz: i64| {
+        let ok = |p: &Path| {
+            std::fs::metadata(p)
+                .map(|md| md.is_file() && md.len() as i64 == sz)
                 .unwrap_or(false)
-        })
-        .count();
+        };
+        ok(&base.join(rel)) || {
+            let n = crate::util::nfc(rel);
+            n != rel && ok(&base.join(&n))
+        }
+    };
+    let name_hits = names.iter().filter(|n| exists(n)).count();
+    let file_hits = files.iter().filter(|(rp, sz)| size_matches(rp, *sz)).count();
     (name_hits, file_hits)
 }
 
