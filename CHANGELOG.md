@@ -18,6 +18,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comparison in both engines. Stored rel_path bytes are deliberately left
   untouched, so a path reconstructed for I/O still opens on
   normalization-sensitive filesystems (exFAT/FAT). No re-index needed.
+- Busy-drive detection matched a bare `index`/`refresh`/… substring in any
+  process's command line, so an unrelated process (an editor on a file
+  named `index.md`, another tool) could be mistaken for a running indexer
+  and silently disable a drive's snapshot/refresh/delete buttons. It now
+  requires a genuine `dx`/`drive_xray.py` invocation with the subcommand as
+  an exact token and a `.db` argument.
+- Concurrent-writer guard is now applied uniformly: snapshot, compact and
+  index re-check the OS immediately before spawning (previously only
+  refresh did), closing the window where a double-click or a second browser
+  tab could launch two writers on the same `.db`. A refused start now
+  surfaces a toast instead of doing nothing visible.
+- Rust engine parity: a fresh Rust-created `.db` now creates the
+  `folder_meta` table (tags/notes) that the Python UI assumes; and the
+  entry insert uses `INSERT OR REPLACE` like Python, so a duplicate
+  `(snapshot_id, path_id)` overwrites instead of aborting the whole index.
+
+### Changed
+- The Doctor panel and a few remaining inline strings are now localized
+  (PT/EN) instead of hardcoded Portuguese.
+- Extracted the ~650-line translation dictionary from `app.py` into
+  `i18n.py` (pure data), shrinking `app.py` by ~20%.
+- Documentation: the Rust `.db` is described as *logically equivalent* to
+  the Python engine's (same rows, same hashes) rather than byte-identical —
+  row insertion order can differ between the two.
 
 ### Performance
 - The Map tab rebuilt the treemap rows on every rerun and opened a fresh

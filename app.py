@@ -220,658 +220,7 @@ st.set_page_config(page_title="drive-xray", layout="wide", page_icon="💾")
 
 # ---------- i18n ----------
 
-TRANSLATIONS = {
-    "pt": {
-        "indexed_drives": "Drives indexadas",
-        "no_drives": "Ainda não tens drives indexadas.",
-        "delete_tooltip": "Remover esta drive do índice",
-        "confirm_delete": "Confirmar remoção",
-        "delete_question": "Apagar o índice **{name}**?\n\nO ficheiro `.db` e os auxiliares (`-wal`, `-shm`) vão ser removidos. **Não** afecta a drive original.",
-        "yes_delete": "Sim, apagar",
-        "cancel": "Cancelar",
-        "index_new_drive": "Indexar nova drive",
-        "path_label": "Caminho",
-        "browse_btn": "📁 Procurar…",
-        "browse_hint": "Abre o Finder para escolheres a pasta.",
-        "label_label": "Etiqueta",
-        "full_hash_label": "Hash completo (--full)",
-        "full_hash_help": "Lento, mas permite comparações offline confirmadas.",
-        "one_fs_label": "Apenas este filesystem (-x)",
-        "one_fs_help": "Não atravessa mount points. Evita /Volumes/* e firmlinks do APFS.",
-        "skip_cloud_label": "Ignorar pastas de cloud (--skip-cloud)",
-        "skip_cloud_help": "Salta iCloud, OneDrive, Google Drive, Dropbox, Box, MEGA, Proton Drive, etc.",
-        "skip_system_label": "Ignorar pastas de sistema",
-        "skip_system_help": "Exclui {names}. Recomendado ao indexar o disco de sistema (C:\\, /); desliga se estas pastas te interessarem.",
-        "index_button": "Indexar",
-        "path_not_exist": "Caminho inexistente.",
-        "indexing": "⏳ A indexar **{label}**…",
-        "completed": "✅ {label} concluída",
-        "exited_with_code": "❌ {label} saiu com código {code}",
-        "clear_log": "Limpar log",
-        "log": "Log",
-        "no_output_yet": "(sem output ainda)",
-        "main_welcome_title": "drive-xray",
-        "main_welcome_body": "Indexa o teu Mac ou drives externas, encontra ficheiros e pastas duplicados, compara drives offline.\n\nComeça por **indexar uma drive** na barra lateral.",
-        "no_metadata_error": "`{name}` não contém metadados de drive. Re-indexa.",
-        "db_cloud_placeholder": "☁️ `{name}` ainda está na cloud (OneDrive/iCloud) e não foi descarregado para este Mac. No Finder, clica-direito no ficheiro → **«Manter sempre neste dispositivo»**, espera o download acabar e tenta de novo. **Não é preciso re-indexar.**",
-        "db_partial_sync": "⚠️ `{name}` parece incompleto — provavelmente a sincronização (OneDrive) ainda está a meio, ou foi interrompida. Espera a sincronização terminar (ícone da nuvem sem atividade) e tenta de novo. **Não é preciso re-indexar** — o índice no outro computador está intacto.",
-        "db_retry": "🔄 Tentar de novo",
-        "drive_busy": "⏳ `{name}` está ocupada — indexação/refresh em curso. Os dados estão intactos; espera que termine.",
-        "drive_busy_retry": "🔄 Tentar de novo",
-        "drive_indexing": "⏳ a indexar… (PID {pid})",
-        "op_log_title": "📜 Log da operação",
-        "op_log_refresh": "Atualizar o log",
-        "engine_stale": "⚠️ O binário dx é a v{have} mas a app é a v{want} — "
-                        "substitui o dx(.exe) pela release v{want}; o binário "
-                        "antigo não tem as correções e funcionalidades novas.",
-        "indexed_on": "indexada em",
-        "tab_summary": "📊 Resumo",
-        "tab_dupes": "🔁 Duplicados",
-        "tab_compare": "⚖️ Comparar",
-        "files": "Ficheiros",
-        "folders": "Pastas",
-        "total_size": "Tamanho total",
-        "top_ext": "Top 20 extensões por tamanho",
-        "ext_col": "extensão",
-        "files_col": "ficheiros",
-        "size_col": "tamanho",
-        "ignore_smaller_mb": "Ignorar ficheiros menores que (MB)",
-        "drive_not_mounted": "A drive `{root}` não está montada — só vão ser usados hashes já existentes na .db (índices feitos sem `--full` podem ter resultados incompletos).",
-        "find_dupes": "Procurar duplicados",
-        "calculating": "A calcular…",
-        "load_duplicates": "Procurar duplicados",
-        "confirm_expander": "🔬 Confirmar com hash completo (opcional, lento)",
-        "confirm_caption": "Lê todos os ficheiros candidatos para confirmar ≈ como = exacto. Pode demorar muito em drives grandes.",
-        "confirm_btn": "Confirmar duplicados (lento)",
-        "confirming_candidates": "A confirmar candidatos com hash completo…",
-        "files_hashed": "{n} ficheiros hashados.",
-        "computing_merkle": "A calcular hashes Merkle das pastas…",
-        "done": "Concluído.",
-        "file_groups": "Grupos de ficheiros",
-        "folder_groups": "Grupos de pastas",
-        "wasted_space": "Espaço desperdiçado (ficheiros)",
-        "duplicate_files": "Ficheiros duplicados",
-        "sorted_top200": "Ordenado por espaço desperdiçado. Top 200.",
-        "wasted": "desperdício",
-        "groups_not_shown": "+ {n} grupos não mostrados",
-        "duplicate_folders": "Pastas duplicadas",
-        "identical_folders": "pastas idênticas",
-        "need_two_drives": "Precisas de pelo menos duas drives indexadas para comparar.",
-        "cross_title": "🔀 Duplicados entre todas as drives",
-        "cross_caption": "Compara todos os índices em simultâneo. As drives não precisam de estar montadas.",
-        "cross_btn": "Procurar duplicados entre todas as drives",
-        "cross_groups": "Grupos",
-        "cross_wasted": "Espaço desperdiçado",
-        "cross_confirmed": "Confirmados (=)",
-        "cross_approx": "Aproximados (≈)",
-        "cross_no_results": "Nenhum duplicado entre drives encontrado com o tamanho mínimo seleccionado.",
-        "cross_col_group": "#",
-        "cross_col_drive": "drive",
-        "cross_col_path": "caminho",
-        "cross_col_size": "tamanho",
-        "cross_col_match": "match",
-        "cross_need_drives": "Precisa de pelo menos 2 drives indexadas.",
-        "cross_firmlink_warn": "ℹ️ **{drives}** — têm múltiplas cópias internas do mesmo conteúdo (backups ou cópias manuais). Os grupos marcados com ⚠️ incluem essas cópias.",
-        "cross_firmlink_groups": "Grupos com cópias internas duplicadas na mesma drive:",
-        "cross_matrix_title": "📊 Sobreposição entre drives",
-        "cross_matrix_caption": "GB partilhados entre cada par de drives. Quanto mais escuro, mais duplicados.",
-        "cross_download_csv": "⬇️ Exportar CSV (todos os grupos)",
-        "cross_details": "📋 Detalhes (top 500 grupos)",
-        # single-copy (no backup) — inverse of cross-dedupe
-        "sc_title": "🛟 Ficheiros sem cópia de segurança",
-        "sc_caption": "O inverso: conteúdo que existe em apenas UMA drive. Se essa drive falhar, perde-o para sempre. Cópias internas na mesma drive não contam como backup.",
-        "sc_need_drives": "Precisa de pelo menos 2 drives indexadas com dados para comparar.",
-        "sc_insufficient": "⚠️ Apenas uma drive tinha dados ({drives}). Sem uma segunda drive para comparar, o resultado seria enganador (tudo pareceria sem cópia). Reindexe as drives vazias/stub.",
-        "sc_scope": "Drive a analisar",
-        "sc_scope_all": "Todas",
-        "sc_btn": "Procurar ficheiros sem cópia",
-        "sc_no_results": "✅ Nada em risco — todo o conteúdo (acima do tamanho mínimo) existe em pelo menos duas drives.",
-        "sc_metric_items": "Itens sem cópia",
-        "sc_metric_bytes": "Total em risco",
-        "sc_metric_drives": "Drives comparadas",
-        "sc_per_drive": "Por drive",
-        "sc_by_folder": "📁 Pastas sem cópia (top 40)",
-        "sc_col_drive": "drive",
-        "sc_col_folder": "pasta",
-        "sc_col_path": "caminho",
-        "sc_col_bytes": "tamanho",
-        "sc_col_count": "nº itens",
-        "sc_col_copies": "cópias internas",
-        "sc_files_title": "📋 Ficheiros sem cópia (top {n} por tamanho)",
-        "sc_download_csv": "⬇️ Exportar CSV (todos os ficheiros em risco)",
-        "bkp_title": "💾 Gerar script de backup",
-        "bkp_caption": "Cria um script que copia estes ficheiros sem cópia para uma drive-alvo (por drive de origem). NÃO executa nada — revês e corres tu. As drives de origem têm de estar montadas.",
-        "bkp_target": "Pasta de destino",
-        "bkp_shell": "Formato",
-        "bkp_download": "⬇️ Descarregar script de backup",
-        "bkp_preview": "Ver script",
-        "sc_truncated": "Tabela mostra os maiores {shown} de {total} itens; o CSV inclui todos.",
-        "compare_with": "Comparar com",
-        "minimum_mb": "Mínimo (MB)",
-        "compare_button": "Comparar",
-        "crosschecking": "A cruzar índices…",
-        "matches": "Matches",
-        "confirmed_eq": "Confirmados (=)",
-        "only_in_a": "Apenas em A",
-        "matching_size": "Tamanho coincidente",
-        "matches_not_shown": "+ {n} matches não mostrados",
-        "in_drive": "em {label}",
-        "match_col": "match",
-        "size_match_col": "tamanho",
-        "hardlink_tag": "hardlink",
-        "hash_version_mismatch": "⚠️ Versões de partial-hash diferentes (A=v{va}, B=v{vb}). Os matches podem não ser fiáveis — re-indexa ambas as drives com a versão actual (v{cur}).",
-        "refresh_tooltip": "Re-indexar incrementalmente (reutiliza hashes de ficheiros inalterados)",
-        "download_csv": "⬇️ Exportar CSV",
-        "download_xlsx": "⬇️ Exportar Excel (XLSX)",
-        "db_size": "Tamanho .db",
-        "compact_button": "🧹 Compactar",
-        "verify_title": "🔬 Verificar integridade (bit-rot)",
-        "verify_caption": "Relê os ficheiros e compara o hash com o guardado — deteta corrupção silenciosa (mesmo tamanho e data, conteúdo diferente). Precisa da drive montada.",
-        "verify_full": "Verificação profunda (ficheiro inteiro)",
-        "verify_full_help": "Mais lento e completo; só para ficheiros com hash completo guardado. Por defeito usa o hash parcial (rápido).",
-        "verify_btn": "🔬 Verificar agora",
-        "verify_running": "A verificar…",
-        "verify_corrupt_short": "corrompidos",
-        "verify_changed": "Tamanho mudou",
-        "verify_missing": "Em falta",
-        "verify_unmounted": "⚠️ Drive não montada em `{root}` — não dá para verificar. Monta o disco.",
-        "verify_rot_found": "🚨 {n} ficheiro(s) com BIT-ROT — conteúdo alterado com o mesmo tamanho+data. NÃO os copies por cima dos backups bons.",
-        "verify_clean": "✅ Sem corrupção — todos os ficheiros batem certo com o hash guardado.",
-        "compact_help": "VACUUM + checkpoint WAL para libertar espaço. Sem perda de dados.",
-        # treemap
-        "tab_map": "🗺️ Mapa",
-        "map_caption": "Treemap de utilização de disco. Cada rectângulo é uma pasta; o tamanho é proporcional ao espaço ocupado. Clica para entrar.",
-        "map_min_mb": "Tamanho mínimo (MB)",
-        "map_include_files": "Incluir ficheiros individuais (não só pastas)",
-        "map_empty": "Sem pastas acima do tamanho mínimo. Baixa o threshold.",
-        "map_legend": "A mostrar {n} elementos.",
-        # tags
-        "tags_expander": "🏷️ Etiquetar pastas",
-        "tags_caption": "Associa etiquetas livres a pastas para identificação rápida. Visíveis no tooltip do mapa.",
-        "tags_select": "Pasta (do mapa actual)",
-        "tags_input": "Etiquetas (separadas por vírgula)",
-        "tags_save": "Guardar",
-        "tags_remove_btn": "Remover etiquetas",
-        "tags_saved": "Etiquetas guardadas.",
-        "tags_removed": "Etiquetas removidas.",
-        "tags_active": "Pastas etiquetadas nesta drive",
-        "tags_none": "Nenhuma pasta etiquetada ainda.",
-        "tags_col_path": "Pasta",
-        "tags_col_tags": "Etiquetas",
-        "tags_filter": "🔍 Filtrar por etiqueta ou pasta",
-        "tags_filter_empty": "Nenhuma etiqueta corresponde ao filtro.",
-        "tags_note_label": "Nota (texto livre)",
-        "tags_note_placeholder": "Backup de 2023-03, já verificado. Contém runs STP e ZP.",
-        "tags_note_save": "Guardar nota",
-        "tags_col_note": "Nota",
-        "tags_legend": "Legenda de cores",
-        "auto_tags_detected": "Detetado automaticamente",
-        "auto_tags_promote": "⬆️ Usar como tags manuais",
-        "auto_tags_legend_note": "pastas com tags automáticas (sem tag manual)",
-        "at_rules_title": "⚙️ Regras de auto-tag ({n} regras)",
-        "at_rules_src_default": "A usar as regras predefinidas (embutidas).",
-        "at_rules_src_custom": "A usar o teu ficheiro de regras personalizado.",
-        "at_rules_init_btn": "Criar ficheiro editável",
-        "at_rules_edit_hint": "Edita este ficheiro (formato `tag: [ext1, ext2]`); as alterações aplicam-se de imediato.",
-        "at_rules_path": "Ficheiro de regras",
-        "at_rules_created": "Ficheiro criado — edita-o para personalizar as regras.",
-        # cold data (archive candidates) — Map tab
-        "upd_title": "🔄 Atualizações (GitHub)",
-        "upd_check": "Verificar atualizações",
-        "upd_uptodate": "✅ Já estás na versão mais recente.",
-        "upd_available": "🆕 {n} atualização(ões) disponível(eis):",
-        "upd_apply": "⬇️ Atualizar agora",
-        "upd_applying": "A atualizar…",
-        "mc_title": "🎬 Media Catalog",
-        "mc_running": "✅ A correr em {url}",
-        "mc_open": "↗️ Abrir Media Catalog",
-        "mc_launch": "▶️ Arrancar Media Catalog",
-        "mc_launching": "A arrancar…",
-        "mc_started": "✅ Arrancado — abre {url}",
-        "mc_not_found": "Pasta do media-catalog não encontrada nesta máquina.",
-        "mc_pick": "📁 Escolher pasta do media-catalog",
-        "mc_or_type": "…ou escreve o caminho",
-        "excl_title": "🚫 Excluir pastas da indexação",
-        "excl_caption": "Pastas que NÃO queres indexar. Escreve um **nome** (`node_modules`) para excluir em qualquer nível, um **padrão** (`*cache*`, `*Extras*`), ou um **caminho** (`Series/Extras`) a partir da raiz. Aplicam-se no próximo refresh.",
-        "excl_add": "Escolher pasta a excluir",
-        "excl_or_type": "…ou nome/padrão",
-        "excl_add_btn": "➕ Excluir",
-        "excl_added": "Exclusão adicionada — faz refresh para aplicar.",
-        "excl_system_btn": "🖥️ Adicionar pastas de sistema",
-        "excl_system_help": "Adiciona de uma vez: {names}. Essencial ao indexar o disco de sistema (C:\\, /) — corta a maior parte dos ficheiros irrelevantes.",
-        "excl_system_added": "{n} exclusões de sistema adicionadas — faz refresh para aplicar.",
-        "excl_current": "Excluídas nesta drive:",
-        "excl_refresh_hint": "🔄 Faz refresh da drive para aplicar as exclusões.",
-        "excl_none": "Sem exclusões nesta drive.",
-        "cold_title": "❄️ Dados frios (candidatos a arquivo)",
-        "cold_badge": "dados frios",
-        "cold_map_hint": "❄️ As pastas frias estão realçadas a azul-gélido no TreeMap acima.",
-        "cold_caption": "Pastas cujo ficheiro mais recente é anterior ao limite — candidatas a arquivo/cold storage. Mostra o topo de cada subárvore fria.",
-        "cold_years": "Mais antigo que (anos)",
-        "cold_btn": "Procurar dados frios",
-        "cold_none": "✅ Nenhuma pasta fria acima do tamanho mínimo com este limite.",
-        "cold_metric_folders": "Pastas frias",
-        "cold_metric_bytes": "Total arquivável",
-        "cold_metric_cutoff": "Anterior a",
-        "cold_col_folder": "pasta",
-        "cold_col_size": "tamanho",
-        "cold_col_newest": "ficheiro mais recente",
-        "cold_col_files": "nº ficheiros",
-        "cold_download_csv": "⬇️ Exportar CSV (todas as pastas frias)",
-        "cold_truncated": "Tabela mostra as maiores {shown} de {total} pastas; o CSV inclui todas.",
-        # cross-drive tag search (Compare tab)
-        "tag_search_title": "🔍 Pesquisar por etiqueta",
-        "tag_search_caption": "Procura em todas as drives indexadas. Corresponde à etiqueta, ao caminho ou à nota.",
-        "tag_search_input": "Etiqueta, caminho ou nota",
-        "tag_search_col_drive": "Drive",
-        "tag_search_col_path": "Pasta",
-        "tag_search_col_tags": "Etiquetas",
-        "tag_search_col_note": "Nota",
-        "tag_search_empty": "Nenhuma pasta etiquetada encontrada.",
-        "tag_search_no_tags": "Ainda não existem etiquetas em nenhuma drive. Usa o tab Mapa para etiquetar pastas.",
-        "tag_search_export": "⬇️ Exportar localizações (CSV)",
-        "tag_search_export_help": "Exporta os resultados atuais (escreve uma etiqueta, p.ex. Artigo1, para exportar só essa) com a localização completa em cada drive.",
-        "tag_search_col_root": "Raiz da drive",
-        "tag_search_col_loc": "Localização",
-        # cleanup
-        "cleanup_title": "🧽 Assistente de limpeza",
-        "cleanup_caption": "Gera um script shell com as remoções/movimentos sugeridos. **Não apaga nada automaticamente** — revê e corre manualmente.",
-        "cleanup_strategy": "Qual cópia manter",
-        "cleanup_action": "Acção para as outras",
-        "strategy_shortest": "Caminho mais curto (recomendado)",
-        "strategy_oldest": "Mais antiga (mtime)",
-        "strategy_newest": "Mais recente (mtime)",
-        "strategy_alphabetical": "Alfabética",
-        "action_quarantine": "Mover para quarentena (~/.drive-xray-quarantine/)",
-        "action_delete": "Apagar (rm — irreversível!)",
-        "cleanup_generate": "Gerar plano",
-        "cleanup_ready": "✅ Plano gerado: {n} acções propostas.",
-        "cleanup_download": "⬇️ Descarregar script .sh",
-        "cleanup_preview": "Pré-visualizar script",
-        # interactive delete
-        "del_title": "🗑️ Apagar seleccionados",
-        "del_caption": "Selecciona as cópias a eliminar (por defeito: mantém o caminho mais curto). Antes de apagar, verifica-se que a cópia a manter ainda existe em disco.",
-        "del_col": "apagar",
-        "del_action_label": "Acção",
-        "del_verify_btn": "Verificar e apagar {n} ficheiro(s) · {size}",
-        "del_none_selected": "Marca pelo menos um ficheiro para apagar.",
-        "del_root_unmounted": "⚠️ Drive não montada — não é possível verificar nem apagar ficheiros.",
-        "del_dialog_title": "Verificação antes de apagar",
-        "del_ok_summary": "✅ {n} grupo(s) verificados · {f} ficheiro(s) · {size} a libertar",
-        "del_no_keeper": "🚫 {n} grupo(s) ignorados — todas as cópias marcadas (ficaria sem nenhuma)",
-        "del_keeper_missing": "⚠️ {n} grupo(s) ignorados — cópia a manter não encontrada em disco",
-        "del_already_gone": "ℹ️ {n} ficheiro(s) já não existem — serão ignorados",
-        "del_nothing_to_do": "Nenhum ficheiro verificado para apagar.",
-        "del_detail": "Ver detalhes por grupo",
-        "del_keeper_label": "manter",
-        "del_execute_btn": "Executar · {n} ficheiro(s) · {size}",
-        "del_done": "✅ {n} ficheiro(s) processados · {size} libertados",
-        "del_errors": "❌ {n} erro(s)",
-        # info / rename
-        "info_tooltip": "Informação e renomear",
-        "drive_info_title": "Informação da drive",
-        "drive_db_path": "Ficheiro .db",
-        "drive_root": "Raiz",
-        "drive_last_indexed": "Última indexação",
-        "rename_label": "Renomear etiqueta",
-        "rename_save": "Guardar",
-        # snapshots / history
-        "snapshot_tooltip": "Tirar novo snapshot (preserva o histórico anterior)",
-        "snapshot_button": "📸 Tirar snapshot",
-        "tab_history": "📅 Histórico",
-        "history_no_snaps": "Esta drive ainda não tem snapshots. Indexa-a primeiro.",
-        "history_title": "{n} snapshots",
-        "history_taken_at": "data",
-        "diff_title": "Comparar snapshots",
-        "diff_from": "De",
-        "diff_to": "Até",
-        "diff_same": "Escolhe snapshots diferentes para o diff.",
-        "diff_compute": "Calcular diff",
-        "diff_added": "Adicionados",
-        "diff_removed": "Removidos",
-        "diff_modified": "Modificados",
-        "diff_net": "Variação líquida",
-        "diff_top_growth": "Top pastas por crescimento",
-        "diff_top_shrink": "Top pastas por redução",
-        # settings / sync
-        "settings_title": "⚙️ Configurações",
-        "settings_db_dir": "Pasta dos índices (.db)",
-        "settings_db_dir_help": "Pasta onde são guardados os ficheiros .db. Usa uma pasta do OneDrive/Google Drive/Dropbox para partilha automática entre máquinas.",
-        "settings_save": "Guardar",
-        "settings_saved": "✅ Pasta actualizada. A reiniciar…",
-        "settings_invalid": "Pasta inválida ou sem permissão de escrita.",
-        "settings_import_btn": "Importar .db desta pasta",
-        "settings_import_help": "Regista todos os ficheiros .db encontrados na pasta configurada.",
-        "settings_imported": "✅ {n} drive(s) importada(s) · {s} já existiam",
-        "settings_import_none": "Nenhum .db válido encontrado nessa pasta.",
-        "settings_current_dir": "Pasta actual",
-    },
-    "en": {
-        "indexed_drives": "Indexed drives",
-        "no_drives": "No drives indexed yet.",
-        "delete_tooltip": "Remove this drive's index",
-        "confirm_delete": "Confirm removal",
-        "delete_question": "Delete index **{name}**?\n\nThe `.db` file and its sidecars (`-wal`, `-shm`) will be removed. This does **not** affect the original drive.",
-        "yes_delete": "Yes, delete",
-        "cancel": "Cancel",
-        "index_new_drive": "Index new drive",
-        "path_label": "Path",
-        "browse_btn": "📁 Browse…",
-        "browse_hint": "Opens Finder to pick the folder.",
-        "label_label": "Label",
-        "full_hash_label": "Full hash (--full)",
-        "full_hash_help": "Slow, but enables confirmed offline comparisons.",
-        "one_fs_label": "Single filesystem only (-x)",
-        "one_fs_help": "Does not cross mount points. Avoids /Volumes/* and APFS firmlinks.",
-        "skip_cloud_label": "Skip cloud folders (--skip-cloud)",
-        "skip_cloud_help": "Skips iCloud, OneDrive, Google Drive, Dropbox, Box, MEGA, Proton Drive, etc.",
-        "skip_system_label": "Ignore system folders",
-        "skip_system_help": "Excludes {names}. Recommended when indexing the system disk (C:\\, /); untick if you want those folders indexed.",
-        "index_button": "Index",
-        "path_not_exist": "Path does not exist.",
-        "indexing": "⏳ Indexing **{label}**…",
-        "completed": "✅ {label} completed",
-        "exited_with_code": "❌ {label} exited with code {code}",
-        "clear_log": "Clear log",
-        "log": "Log",
-        "no_output_yet": "(no output yet)",
-        "main_welcome_title": "drive-xray",
-        "main_welcome_body": "Index your Mac or external drives, find duplicate files and folders, compare drives offline.\n\nStart by **indexing a drive** in the sidebar.",
-        "no_metadata_error": "`{name}` has no drive metadata. Please re-index.",
-        "db_cloud_placeholder": "☁️ `{name}` is still in the cloud (OneDrive/iCloud) and has not been downloaded to this Mac. In Finder, right-click the file → **\"Always Keep on This Device\"**, wait for the download, then try again. **No re-index needed.**",
-        "db_partial_sync": "⚠️ `{name}` looks incomplete — most likely the sync (OneDrive) is still in progress or was interrupted. Wait for sync to finish (cloud icon idle) and try again. **No re-index needed** — the index on the other machine is intact.",
-        "db_retry": "🔄 Try again",
-        "drive_busy": "⏳ `{name}` is busy — an index/refresh is in progress. Your data is intact; wait for it to finish.",
-        "drive_busy_retry": "🔄 Try again",
-        "drive_indexing": "⏳ indexing… (PID {pid})",
-        "op_log_title": "📜 Operation log",
-        "op_log_refresh": "Refresh the log",
-        "engine_stale": "⚠️ The dx binary is v{have} but the app is v{want} — "
-                        "replace dx(.exe) with the v{want} release build; the "
-                        "old binary is missing new fixes and features.",
-        "indexed_on": "indexed on",
-        "tab_summary": "📊 Summary",
-        "tab_dupes": "🔁 Duplicates",
-        "tab_compare": "⚖️ Compare",
-        "files": "Files",
-        "folders": "Folders",
-        "total_size": "Total size",
-        "top_ext": "Top 20 extensions by size",
-        "ext_col": "extension",
-        "files_col": "files",
-        "size_col": "size",
-        "ignore_smaller_mb": "Ignore files smaller than (MB)",
-        "drive_not_mounted": "Drive `{root}` is not mounted — only hashes already in the .db will be used (indexes built without `--full` may have incomplete results).",
-        "find_dupes": "Find duplicates",
-        "calculating": "Calculating…",
-        "load_duplicates": "Find duplicates",
-        "confirm_expander": "🔬 Confirm with full hash (optional, slow)",
-        "confirm_caption": "Reads every candidate file to upgrade ≈ matches to exact =. Can take a long time on large drives.",
-        "confirm_btn": "Confirm duplicates (slow)",
-        "confirming_candidates": "Confirming candidates with full hashes…",
-        "files_hashed": "{n} files hashed.",
-        "computing_merkle": "Computing folder Merkle hashes…",
-        "done": "Done.",
-        "file_groups": "File groups",
-        "folder_groups": "Folder groups",
-        "wasted_space": "Wasted space (files)",
-        "duplicate_files": "Duplicate files",
-        "sorted_top200": "Sorted by wasted space. Top 200.",
-        "wasted": "wasted",
-        "groups_not_shown": "+ {n} groups not shown",
-        "duplicate_folders": "Duplicate folders",
-        "identical_folders": "identical folders",
-        "need_two_drives": "You need at least two indexed drives to compare.",
-        "cross_title": "🔀 Duplicates across all drives",
-        "cross_caption": "Compares all indexes at once. Drives do not need to be mounted.",
-        "cross_btn": "Find duplicates across all drives",
-        "cross_groups": "Groups",
-        "cross_wasted": "Wasted space",
-        "cross_confirmed": "Confirmed (=)",
-        "cross_approx": "Approximate (≈)",
-        "cross_no_results": "No cross-drive duplicates found at the selected minimum size.",
-        "cross_col_group": "#",
-        "cross_col_drive": "drive",
-        "cross_col_path": "path",
-        "cross_col_size": "size",
-        "cross_col_match": "match",
-        "cross_need_drives": "Need at least 2 indexed drives.",
-        "cross_firmlink_warn": "ℹ️ **{drives}** — have multiple internal copies of the same content (backups or manual copies). Groups marked ⚠️ include these copies.",
-        "cross_firmlink_groups": "Groups with internal duplicate copies on the same drive:",
-        "cross_matrix_title": "📊 Drive overlap",
-        "cross_matrix_caption": "Shared GB between each pair of drives. Darker = more duplicates.",
-        "cross_download_csv": "⬇️ Export CSV (all groups)",
-        "cross_details": "📋 Details (top 500 groups)",
-        # single-copy (no backup) — inverse of cross-dedupe
-        "sc_title": "🛟 Files with no backup",
-        "sc_caption": "The inverse: content that lives on only ONE drive. If that drive dies, it's gone for good. Internal copies on the same drive do not count as a backup.",
-        "sc_need_drives": "Need at least 2 indexed drives with data to compare.",
-        "sc_insufficient": "⚠️ Only one drive had data ({drives}). Without a second drive to compare against, the result would be misleading (everything would look un-backed-up). Re-index the empty/stub drives.",
-        "sc_scope": "Drive to analyse",
-        "sc_scope_all": "All",
-        "sc_btn": "Find files with no backup",
-        "sc_no_results": "✅ Nothing at risk — all content (above the minimum size) exists on at least two drives.",
-        "sc_metric_items": "Un-backed items",
-        "sc_metric_bytes": "Total at risk",
-        "sc_metric_drives": "Drives compared",
-        "sc_per_drive": "Per drive",
-        "sc_by_folder": "📁 Folders with no backup (top 40)",
-        "sc_col_drive": "drive",
-        "sc_col_folder": "folder",
-        "sc_col_path": "path",
-        "sc_col_bytes": "size",
-        "sc_col_count": "items",
-        "sc_col_copies": "internal copies",
-        "sc_files_title": "📋 Files with no backup (top {n} by size)",
-        "sc_download_csv": "⬇️ Export CSV (all at-risk files)",
-        "bkp_title": "💾 Generate backup script",
-        "bkp_caption": "Builds a script that copies these un-backed-up files to a target drive (per source drive). It does NOT run anything — review and run it yourself. Source drives must be mounted.",
-        "bkp_target": "Target folder",
-        "bkp_shell": "Format",
-        "bkp_download": "⬇️ Download backup script",
-        "bkp_preview": "Preview script",
-        "sc_truncated": "Table shows the largest {shown} of {total} items; the CSV has them all.",
-        "compare_with": "Compare with",
-        "minimum_mb": "Minimum (MB)",
-        "compare_button": "Compare",
-        "crosschecking": "Cross-checking indexes…",
-        "matches": "Matches",
-        "confirmed_eq": "Confirmed (=)",
-        "only_in_a": "Only in A",
-        "matching_size": "Matching size",
-        "matches_not_shown": "+ {n} matches not shown",
-        "in_drive": "in {label}",
-        "match_col": "match",
-        "size_match_col": "size",
-        "hardlink_tag": "hardlink",
-        "hash_version_mismatch": "⚠️ Partial-hash versions differ (A=v{va}, B=v{vb}). Matches may be unreliable — re-index both drives with the current version (v{cur}).",
-        "refresh_tooltip": "Refresh incrementally (reuses hashes of unchanged files)",
-        "download_csv": "⬇️ Export CSV",
-        "download_xlsx": "⬇️ Export Excel (XLSX)",
-        "db_size": ".db size",
-        "compact_button": "🧹 Compact",
-        "verify_title": "🔬 Verify integrity (bit-rot)",
-        "verify_caption": "Re-reads files and compares hashes to the stored ones — catches silent corruption (same size+date, different content). Drive must be mounted.",
-        "verify_full": "Deep verify (whole file)",
-        "verify_full_help": "Slower and thorough; only for files with a stored full hash. Defaults to the fast partial hash.",
-        "verify_btn": "🔬 Verify now",
-        "verify_running": "Verifying…",
-        "verify_corrupt_short": "corrupted",
-        "verify_changed": "Size changed",
-        "verify_missing": "Missing",
-        "verify_unmounted": "⚠️ Drive not mounted at `{root}` — cannot verify. Mount it.",
-        "verify_rot_found": "🚨 {n} file(s) with BIT-ROT — content changed with the same size+date. Do NOT copy these over your good backups.",
-        "verify_clean": "✅ No corruption — every file matches its stored hash.",
-        "compact_help": "VACUUM + WAL checkpoint to reclaim space. No data loss.",
-        # treemap
-        "tab_map": "🗺️ Map",
-        "map_caption": "Disk usage treemap. Each rectangle is a folder; size is proportional to space used. Click to drill in.",
-        "map_min_mb": "Minimum size (MB)",
-        "map_include_files": "Include individual files (not just folders)",
-        "map_empty": "No folders above the minimum size. Lower the threshold.",
-        "map_legend": "Showing {n} items.",
-        # tags
-        "tags_expander": "🏷️ Tag folders",
-        "tags_caption": "Attach free-form tags to folders for quick identification. Visible in map tooltips.",
-        "tags_select": "Folder (from current map)",
-        "tags_input": "Tags (comma-separated)",
-        "tags_save": "Save",
-        "tags_remove_btn": "Remove tags",
-        "tags_saved": "Tags saved.",
-        "tags_removed": "Tags removed.",
-        "tags_active": "Tagged folders in this drive",
-        "tags_none": "No folders tagged yet.",
-        "tags_col_path": "Folder",
-        "tags_col_tags": "Tags",
-        "tags_filter": "🔍 Filter by tag or path",
-        "tags_filter_empty": "No tags match the filter.",
-        "tags_note_label": "Note (free text)",
-        "tags_note_placeholder": "Backup from 2023-03, verified. Contains STP and ZP runs.",
-        "tags_note_save": "Save note",
-        "tags_col_note": "Note",
-        "tags_legend": "Color legend",
-        "auto_tags_detected": "Auto-detected",
-        "auto_tags_promote": "⬆️ Use as manual tags",
-        "auto_tags_legend_note": "folders with auto-detected tags (no manual tag)",
-        "at_rules_title": "⚙️ Auto-tag rules ({n} rules)",
-        "at_rules_src_default": "Using the built-in default rules.",
-        "at_rules_src_custom": "Using your custom rules file.",
-        "at_rules_init_btn": "Create editable file",
-        "at_rules_edit_hint": "Edit this file (format `tag: [ext1, ext2]`); changes apply immediately.",
-        "at_rules_path": "Rules file",
-        "at_rules_created": "File created — edit it to customise the rules.",
-        # cold data (archive candidates) — Map tab
-        "upd_title": "🔄 Updates (GitHub)",
-        "upd_check": "Check for updates",
-        "upd_uptodate": "✅ You're on the latest version.",
-        "upd_available": "🆕 {n} update(s) available:",
-        "upd_apply": "⬇️ Update now",
-        "upd_applying": "Updating…",
-        "mc_title": "🎬 Media Catalog",
-        "mc_running": "✅ Running at {url}",
-        "mc_open": "↗️ Open Media Catalog",
-        "mc_launch": "▶️ Start Media Catalog",
-        "mc_launching": "Starting…",
-        "mc_started": "✅ Started — open {url}",
-        "mc_not_found": "media-catalog folder not found on this machine.",
-        "mc_pick": "📁 Pick the media-catalog folder",
-        "mc_or_type": "…or type the path",
-        "excl_title": "🚫 Exclude folders from indexing",
-        "excl_caption": "Folders you do NOT want indexed. Type a **name** (`node_modules`) to exclude at any depth, a **pattern** (`*cache*`, `*Extras*`), or a **path** (`Series/Extras`) from the root. Applied on the next refresh.",
-        "excl_add": "Pick a folder to exclude",
-        "excl_or_type": "…or name/pattern",
-        "excl_add_btn": "➕ Exclude",
-        "excl_added": "Exclusion added — refresh to apply.",
-        "excl_system_btn": "🖥️ Add system folders",
-        "excl_system_help": "Adds in one click: {names}. Essential when indexing the system disk (C:\\, /) — cuts most of the irrelevant files.",
-        "excl_system_added": "{n} system exclusions added — refresh to apply.",
-        "excl_current": "Excluded on this drive:",
-        "excl_refresh_hint": "🔄 Refresh the drive to apply exclusions.",
-        "excl_none": "No exclusions on this drive.",
-        "cold_title": "❄️ Cold data (archive candidates)",
-        "cold_badge": "cold data",
-        "cold_map_hint": "❄️ Cold folders are highlighted in icy blue on the TreeMap above.",
-        "cold_caption": "Folders whose newest file predates the cutoff — candidates for archival/cold storage. Shows the top of each cold subtree.",
-        "cold_years": "Older than (years)",
-        "cold_btn": "Find cold data",
-        "cold_none": "✅ No cold folders above the minimum size at this cutoff.",
-        "cold_metric_folders": "Cold folders",
-        "cold_metric_bytes": "Total archivable",
-        "cold_metric_cutoff": "Older than",
-        "cold_col_folder": "folder",
-        "cold_col_size": "size",
-        "cold_col_newest": "newest file",
-        "cold_col_files": "files",
-        "cold_download_csv": "⬇️ Export CSV (all cold folders)",
-        "cold_truncated": "Table shows the largest {shown} of {total} folders; the CSV has them all.",
-        # cross-drive tag search (Compare tab)
-        "tag_search_title": "🔍 Search by tag",
-        "tag_search_caption": "Searches all indexed drives. Matches tag name, folder path, or note.",
-        "tag_search_input": "Tag, path or note",
-        "tag_search_col_drive": "Drive",
-        "tag_search_col_path": "Folder",
-        "tag_search_col_tags": "Tags",
-        "tag_search_col_note": "Note",
-        "tag_search_empty": "No tagged folders found.",
-        "tag_search_no_tags": "No tags exist on any drive yet. Use the Map tab to tag folders.",
-        "tag_search_export": "⬇️ Export locations (CSV)",
-        "tag_search_export_help": "Exports the current results (type a tag, e.g. Artigo1, to export just that one) with the full location on each drive.",
-        "tag_search_col_root": "Drive root",
-        "tag_search_col_loc": "Location",
-        # cleanup
-        "cleanup_title": "🧽 Cleanup assistant",
-        "cleanup_caption": "Generates a shell script of suggested removals/moves. **It does NOT delete anything automatically** — review and run manually.",
-        "cleanup_strategy": "Which copy to keep",
-        "cleanup_action": "What to do with the others",
-        "strategy_shortest": "Shortest path (recommended)",
-        "strategy_oldest": "Oldest (mtime)",
-        "strategy_newest": "Newest (mtime)",
-        "strategy_alphabetical": "Alphabetical",
-        "action_quarantine": "Move to quarantine (~/.drive-xray-quarantine/)",
-        "action_delete": "Delete (rm — irreversible!)",
-        "cleanup_generate": "Generate plan",
-        "cleanup_ready": "✅ Plan generated: {n} proposed actions.",
-        "cleanup_download": "⬇️ Download .sh script",
-        "cleanup_preview": "Preview script",
-        # interactive delete
-        "del_title": "🗑️ Delete selected",
-        "del_caption": "Select which copies to remove (default: keep shortest path). Before deleting, the tool verifies the copy to keep still exists on disk.",
-        "del_col": "delete",
-        "del_action_label": "Action",
-        "del_verify_btn": "Verify and delete {n} file(s) · {size}",
-        "del_none_selected": "Mark at least one file for deletion.",
-        "del_root_unmounted": "⚠️ Drive not mounted — cannot verify or delete files.",
-        "del_dialog_title": "Pre-delete verification",
-        "del_ok_summary": "✅ {n} group(s) verified · {f} file(s) · {size} to free",
-        "del_no_keeper": "🚫 {n} group(s) skipped — all copies marked (would leave zero copies)",
-        "del_keeper_missing": "⚠️ {n} group(s) skipped — keeper not found on disk",
-        "del_already_gone": "ℹ️ {n} file(s) already gone — will be skipped",
-        "del_nothing_to_do": "No files verified for deletion.",
-        "del_detail": "Show details per group",
-        "del_keeper_label": "keep",
-        "del_execute_btn": "Execute · {n} file(s) · {size}",
-        "del_done": "✅ {n} file(s) processed · {size} freed",
-        "del_errors": "❌ {n} error(s)",
-        # info / rename
-        "info_tooltip": "Info & rename",
-        "drive_info_title": "Drive info",
-        "drive_db_path": ".db file",
-        "drive_root": "Root",
-        "drive_last_indexed": "Last indexed",
-        "rename_label": "Rename label",
-        "rename_save": "Save",
-        # snapshots / history
-        "snapshot_tooltip": "Take new snapshot (preserves previous history)",
-        "snapshot_button": "📸 Take snapshot",
-        "tab_history": "📅 History",
-        "history_no_snaps": "This drive has no snapshots yet. Index it first.",
-        "history_title": "{n} snapshots",
-        "history_taken_at": "taken at",
-        "diff_title": "Compare snapshots",
-        "diff_from": "From",
-        "diff_to": "To",
-        "diff_same": "Pick different snapshots for the diff.",
-        "diff_compute": "Compute diff",
-        "diff_added": "Added",
-        "diff_removed": "Removed",
-        "diff_modified": "Modified",
-        "diff_net": "Net change",
-        "diff_top_growth": "Top folders by growth",
-        "diff_top_shrink": "Top folders by shrink",
-        # settings / sync
-        "settings_title": "⚙️ Settings",
-        "settings_db_dir": "Index folder (.db files)",
-        "settings_db_dir_help": "Folder where .db files are saved. Point to a OneDrive/Google Drive/Dropbox folder for automatic multi-machine sync.",
-        "settings_save": "Save",
-        "settings_saved": "✅ Folder updated. Restarting…",
-        "settings_invalid": "Invalid folder or no write permission.",
-        "settings_import_btn": "Import .db files from this folder",
-        "settings_import_help": "Register all valid .db files found in the configured folder.",
-        "settings_imported": "✅ {n} drive(s) imported · {s} already existed",
-        "settings_import_none": "No valid .db files found in that folder.",
-        "settings_current_dir": "Current folder",
-    },
-}
+from i18n import TRANSLATIONS
 
 
 def t(key: str, **fmt) -> str:
@@ -1001,6 +350,19 @@ def start_snapshot(db: Path) -> None:
            staged=target if staged else None)
 
 
+def _spawn_guarded(db: Path, start_fn) -> None:
+    """Bust the 3s process cache and re-check the OS right before spawning, so
+    a stale render (or a double-click / second browser tab) can't launch a
+    second concurrent writer over one already running on this drive. On
+    refusal, surface a toast instead of a silent no-op, then rerun."""
+    _active_index_procs.clear()
+    if _busy_pid_for(db, _active_index_procs()):
+        st.toast(t("op_already_running", name=db.name), icon="⏳")
+    else:
+        start_fn(db)
+    st.rerun()
+
+
 @st.cache_data(ttl=3, show_spinner=False)
 def _active_index_procs() -> dict:
     """Map resolved-db-path -> pid for any live `dx` index/refresh/snapshot/
@@ -1025,19 +387,29 @@ def _active_index_procs() -> dict:
     except Exception:
         return {}
     procs: dict[str, int] = {}
-    subs = ("refresh", "index", "snapshot", "compact")
+    subs = {"refresh", "index", "snapshot", "compact"}
+    # Only count genuine dx invocations. Matching a bare " index" substring
+    # flagged any unrelated process with such a word in its command line
+    # (an editor on a file called "index.md", another tool) and silently
+    # disabled this drive's buttons. Require the dx executable itself
+    # (the Rust `dx` binary or `drive_xray.py`), the subcommand as an exact
+    # token, AND a .db argument.
+    markers = {"dx", "drive_xray.py", os.path.basename(DX_CMD[0])}
     for line in out.splitlines():
         line = line.strip()
         if not line or " <defunct>" in line:
             continue  # skip zombies — they hold no lock
-        if not any(f" {s}" in line for s in subs):
-            continue
         parts = line.split()
         try:
             pid = int(parts[0])
         except (ValueError, IndexError):
             continue
-        for tok in parts[1:]:
+        toks = parts[1:]
+        is_dx = any(os.path.basename(tok) in markers
+                    or tok.endswith("drive_xray.py") for tok in toks)
+        if not is_dx or not any(tok in subs for tok in toks):
+            continue
+        for tok in toks:
             if tok.endswith(".db"):
                 try:
                     procs[str(Path(tok).resolve())] = pid
@@ -1597,21 +969,12 @@ with st.sidebar:
                 "📸", key=f"snap_{db}", help=t("snapshot_tooltip"),
                 disabled=_write_disabled,
             ):
-                start_snapshot(db)
-                st.rerun()
+                _spawn_guarded(db, start_snapshot)
             if c4.button(
                 "🔄", key=f"ref_{db}", help=t("refresh_tooltip"),
                 disabled=_write_disabled,
             ):
-                # belt-and-suspenders: bypass the 3s cache and re-check the OS
-                # right before spawning, so a stale render can't launch a
-                # second concurrent writer over a running one.
-                _active_index_procs.clear()
-                if _busy_pid_for(db, _active_index_procs()):
-                    st.rerun()  # already indexing — refuse silently
-                else:
-                    start_refresh(db)
-                    st.rerun()
+                _spawn_guarded(db, start_refresh)
             if c5.button(
                 "🗑️", key=f"del_{db}", help=t("delete_tooltip"),
             ):
@@ -1671,15 +1034,24 @@ with st.sidebar:
             label = (new_label.strip()
                      or Path(expanded.rstrip("/")).name
                      or "drive")
-            if skip_system:
-                # seed the exclusions BEFORE the indexer starts: both engines
-                # read the db's exclusion list at walk time, and a fresh index
-                # wipes entries/snapshots/drive but preserves exclusions.
-                _db_out = DB_DIR / f"{label}.db"
-                _existing = get_exclusions(_db_out) if _db_out.exists() else []
-                set_exclusions(_db_out, _existing + SYSTEM_EXCLUDE_DIRS)
-            start_indexer(expanded, label, do_full, one_fs, skip_cloud)
-            st.rerun()
+            _db_out = DB_DIR / f"{label}.db"
+            # re-check the OS right before spawning (the disabled= flag is up
+            # to 3s stale) so a second index can't be launched over one already
+            # writing this db
+            _active_index_procs.clear()
+            if _busy_pid_for(_db_out, _active_index_procs()):
+                st.toast(t("op_already_running", name=_db_out.name), icon="⏳")
+                st.rerun()
+            else:
+                if skip_system:
+                    # seed the exclusions BEFORE the indexer starts: both
+                    # engines read the db's exclusion list at walk time, and a
+                    # fresh index wipes entries/snapshots/drive but preserves
+                    # exclusions.
+                    _existing = get_exclusions(_db_out) if _db_out.exists() else []
+                    set_exclusions(_db_out, _existing + SYSTEM_EXCLUDE_DIRS)
+                start_indexer(expanded, label, do_full, one_fs, skip_cloud)
+                st.rerun()
 
     # indexer status
     proc = st.session_state.get("idx_proc")
@@ -1803,7 +1175,7 @@ if "del_plan" in st.session_state:
                 for _d in _g["to_delete"]:
                     _di = "🗑️" if _d["exists"] else "👻"
                     st.markdown(f"  {_di} `{_d['path']}`"
-                                + ("" if _d["exists"] else " *(já eliminado)*"))
+                                + ("" if _d["exists"] else t("deleted_marker")))
 
         if not _exec_files:
             st.warning(t("del_nothing_to_do"))
@@ -1974,26 +1346,25 @@ with tab_summary:
     if st.button(t("compact_button"), help=t("compact_help"),
                  disabled=proc_running
                  or _busy_pid_for(selected_db, _busy_procs) is not None):
-        start_compact(selected_db)
-        st.rerun()
+        _spawn_guarded(selected_db, start_compact)
 
     # ── structural DB health check ────────────────────────────────────────────
-    with st.expander("🩺 Doctor", expanded=False):
-        st.caption("Valida a estrutura do índice sem modificar a base de dados.")
-        if st.button("🩺 Correr doctor", key="doctor_btn"):
+    with st.expander(t("doctor_title"), expanded=False):
+        st.caption(t("doctor_caption"))
+        if st.button(t("doctor_run"), key="doctor_btn"):
             from drive_xray import doctor_db
             st.session_state["doctor_result"] = doctor_db(selected_db)
             st.session_state["doctor_result_db"] = str(selected_db)
         _doc = st.session_state.get("doctor_result")
         if _doc and st.session_state.get("doctor_result_db") == str(selected_db):
             if _doc.get("ok"):
-                st.success("Todos os checks passaram.")
+                st.success(t("doctor_ok"))
             else:
-                st.error("Foram encontrados problemas neste índice.")
+                st.error(t("doctor_problems"))
             st.dataframe(
                 [{"": "✓" if c["ok"] else "✗",
-                  "check": c["name"],
-                  "detalhe": c["detail"]}
+                  t("doctor_col_check"): c["name"],
+                  t("doctor_col_detail"): c["detail"]}
                  for c in _doc.get("checks", [])],
                 width="stretch", hide_index=True,
             )
@@ -2718,8 +2089,7 @@ with tab_history:
                      disabled=proc_running
                      or _busy_pid_for(selected_db, _busy_procs) is not None,
                      key="snap_btn_history"):
-            start_snapshot(selected_db)
-            st.rerun()
+            _spawn_guarded(selected_db, start_snapshot)
 
         st.dataframe(
             [
@@ -2915,7 +2285,7 @@ with tab_compare:
                                drives=", ".join(f"**{d}**" for d in sorted(_suspect))))
                     if _intra_groups:
                         with st.expander(t("cross_firmlink_groups"), expanded=False):
-                            st.write(f"Grupos: {_intra_groups[:50]}"
+                            st.write(t("cross_group_ids", ids=_intra_groups[:50])
                                      + (f" … +{len(_intra_groups)-50}" if len(_intra_groups) > 50 else ""))
 
                 # ── N×N heatmap ──────────────────────────────────────────────
@@ -3136,7 +2506,7 @@ with tab_compare:
                         mime="text/plain", key="bkp_dl")
                     with st.expander(t("bkp_preview"), expanded=False):
                         st.code(_script[:4000]
-                                + ("\n… (truncado)" if len(_script) > 4000 else ""),
+                                + (t("script_truncated") if len(_script) > 4000 else ""),
                                 language="bash")
 
     st.divider()

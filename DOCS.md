@@ -465,8 +465,10 @@ sobrestimar.
 ### Rust port
 
 🎉 **Sprints 1-5 entregues.** O binário `dx` em [`rust/`](rust/) é
-drop-in compatível com a CLI Python (mesmos subcommandos, mesma `.db`
-v4 byte-a-byte) e ~10× mais rápido em `index`/`snapshot`.
+drop-in compatível com a CLI Python (mesmos subcommandos, `.db` v4
+**logicamente equivalente** — mesmas linhas, mesmos hashes; a ordem de
+inserção das linhas pode diferir, por isso o ficheiro não é garantido
+byte-a-byte) e ~10× mais rápido em `index`/`snapshot`.
 
 Estado:
 

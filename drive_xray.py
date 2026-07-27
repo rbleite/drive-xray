@@ -1799,7 +1799,7 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
                     kept2.append(d)
             dirnames[:] = kept2
         # rel paths are ALWAYS stored with '/' — the .db must be portable
-        # across OSes and byte-identical to the Rust engine's output. Only
+        # across OSes and match the Rust engine's rel_path values. Only
         # Windows needs the fix-up ('\' is the separator there); on POSIX a
         # '\' is a legal filename character and must be left alone.
         def _rel(p: Path) -> str:
