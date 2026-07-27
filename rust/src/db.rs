@@ -68,6 +68,12 @@ CREATE INDEX IF NOT EXISTS idx_snap_parent ON entries(snapshot_id, parent_id);
 CREATE INDEX IF NOT EXISTS idx_snap_size_partial ON entries(snapshot_id, size, partial_hash) WHERE is_dir=0;
 CREATE INDEX IF NOT EXISTS idx_full ON entries(full_hash);
 CREATE INDEX IF NOT EXISTS idx_snap_inode ON entries(snapshot_id, inode, device);
+CREATE TABLE IF NOT EXISTS folder_meta (
+    rel_path TEXT PRIMARY KEY,
+    tags     TEXT NOT NULL DEFAULT '[]',
+    note     TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS exclusions (rel_path TEXT PRIMARY KEY);
 "#;
 
