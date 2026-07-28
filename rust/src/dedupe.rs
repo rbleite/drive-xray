@@ -78,7 +78,7 @@ pub fn fill_full_hashes(
     // Single transaction with one prepared statement.
     let tx = conn.transaction()?;
     {
-        let mut stmt = tx.prepare("UPDATE entries SET full_hash=? WHERE id=?")?;
+        let mut stmt = tx.prepare("UPDATE entries_core SET full_hash=? WHERE id=?")?;
         for (id, h) in &hashes {
             stmt.execute(params![h, id])?;
         }
@@ -154,7 +154,7 @@ pub fn compute_dir_hashes(db_path: &Path, snapshot_id: Option<i64>) -> Result<()
     // None outcome leaves full_hash NULL (same as Python).
     let tx = conn.transaction()?;
     {
-        let mut stmt = tx.prepare("UPDATE entries SET full_hash=? WHERE id=?")?;
+        let mut stmt = tx.prepare("UPDATE entries_core SET full_hash=? WHERE id=?")?;
         for did in &dir_ids {
             let h = resolved.get(did).copied().flatten();
             let blob = h.map(|b| b.to_vec());

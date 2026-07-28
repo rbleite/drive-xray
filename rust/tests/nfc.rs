@@ -21,32 +21,53 @@ fn nfd(s: &str) -> String {
     s.nfd().collect()
 }
 
-/// Rewrite stored rel_paths to NFD to simulate a macOS-indexed db. Optionally
-/// scoped to one snapshot.
+/// Make the stored paths decomposed (NFD), simulating a macOS-indexed db.
+///
+/// Since v7 the path text is interned in `paths` and shared by every snapshot
+/// referencing it, so this mirrors what really happens across a Mac↔Windows
+/// sync: each OS interns its own spelling, producing a SEPARATE paths row (the
+/// interning key is (parent_id, segment), and the NFD segment differs from the
+/// NFC one). With `snapshot_id` set, only that snapshot's rows are repointed to
+/// the NFD twins — exactly the cross-OS skew the diff has to reconcile.
 fn flip_stored_to_nfd(db: &Path, snapshot_id: Option<i64>) {
     let conn = Connection::open(db).unwrap();
-    let sql = match snapshot_id {
-        Some(_) => "SELECT id, rel_path FROM entries WHERE rel_path != '.' AND snapshot_id = ?1",
-        None => "SELECT id, rel_path FROM entries WHERE rel_path != '.'",
+    let rows: Vec<(i64, Option<i64>, String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, parent_id, segment, full_path FROM paths \
+                 WHERE full_path != '.' ORDER BY LENGTH(full_path)",
+            )
+            .unwrap();
+        let it = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap();
+        it.filter_map(Result::ok).collect()
     };
-    let mut stmt = conn.prepare(sql).unwrap();
-    let rows: Vec<(i64, String)> = if let Some(sid) = snapshot_id {
-        stmt.query_map([sid], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap()
-            .filter_map(Result::ok)
-            .collect()
-    } else {
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap()
-            .filter_map(Result::ok)
-            .collect()
-    };
-    for (id, rel) in rows {
-        let d = nfd(&rel);
-        if d != rel {
-            conn.execute("UPDATE entries SET rel_path=?1 WHERE id=?2", rusqlite::params![d, id])
-                .unwrap();
+    let mut twin: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    for (pid, parent, seg, fp) in rows {
+        if nfd(&seg) == seg && nfd(&fp) == fp {
+            continue; // nothing to decompose
         }
+        let new_parent = parent.map(|p| *twin.get(&p).unwrap_or(&p));
+        conn.execute(
+            "INSERT INTO paths (parent_id, segment, full_path) VALUES (?1,?2,?3)",
+            rusqlite::params![new_parent, nfd(&seg), nfd(&fp)],
+        )
+        .unwrap();
+        twin.insert(pid, conn.last_insert_rowid());
+    }
+    for (old, new) in twin {
+        match snapshot_id {
+            Some(sid) => conn.execute(
+                "UPDATE entries_core SET path_id=?1 WHERE path_id=?2 AND snapshot_id=?3",
+                rusqlite::params![new, old, sid],
+            ),
+            None => conn.execute(
+                "UPDATE entries_core SET path_id=?1 WHERE path_id=?2",
+                rusqlite::params![new, old],
+            ),
+        }
+        .unwrap();
     }
 }
 

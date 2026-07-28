@@ -31,6 +31,16 @@ fn table_columns(conn: &Connection, table: &str) -> HashSet<String> {
     rows.filter_map(Result::ok).collect()
 }
 
+/// "table" / "view" / None — v7 turns `entries` into a view.
+fn object_type(conn: &Connection, name: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT type FROM sqlite_master WHERE name=?1",
+        [name],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
 fn index_names(conn: &Connection, table: &str) -> HashSet<String> {
     let mut stmt = conn
         .prepare(&format!("PRAGMA index_list({table})"))
@@ -46,6 +56,8 @@ fn fresh_db_has_v4_schema() {
     let path = dir.join("fresh.db");
     let conn = open_db(&path).unwrap();
 
+    // v7: `entries` is a VIEW exposing the historical 14 columns in the
+    // historical order, so every read query keeps working unchanged.
     let ent_cols = table_columns(&conn, "entries");
     let expected: HashSet<String> = [
         "id", "snapshot_id", "rel_path", "path_id", "parent_id", "is_dir",
@@ -55,13 +67,31 @@ fn fresh_db_has_v4_schema() {
     .iter()
     .map(|s| s.to_string())
     .collect();
-    assert_eq!(ent_cols, expected, "entries columns differ");
+    assert_eq!(ent_cols, expected, "entries view columns differ");
+    assert_eq!(
+        object_type(&conn, "entries").as_deref(), Some("view"),
+        "entries must be the compatibility view since v7"
+    );
 
-    // v5 also has a `paths` table
+    // ...and the physical row store carries no rel_path: the path text is
+    // stored once in `paths`, not once per snapshot per file.
+    let core_cols = table_columns(&conn, "entries_core");
+    let expected_core: HashSet<String> = [
+        "id", "snapshot_id", "path_id", "parent_id", "is_dir",
+        "size", "mtime", "partial_hash", "full_hash",
+        "is_symlink", "error", "inode", "device",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert_eq!(core_cols, expected_core, "entries_core columns differ");
+
+    // v5 also has a `paths` table; v7 adds the materialized full_path
     let paths_cols = table_columns(&conn, "paths");
     assert!(paths_cols.contains("id"));
     assert!(paths_cols.contains("parent_id"));
     assert!(paths_cols.contains("segment"));
+    assert!(paths_cols.contains("full_path"));
 
     let snap_cols = table_columns(&conn, "snapshots");
     assert!(snap_cols.contains("id"));
@@ -81,7 +111,8 @@ fn fresh_db_has_v4_schema() {
         assert!(fm_cols.contains(c), "folder_meta missing column {c}");
     }
 
-    let entry_indexes = index_names(&conn, "entries");
+    // v7: the indexes keep their names but sit on the physical table.
+    let entry_indexes = index_names(&conn, "entries_core");
     // v5: the heavy idx_snap_path (UNIQUE on text rel_path) is gone, replaced
     // by idx_snap_path_id (UNIQUE on int path_id).
     assert!(entry_indexes.contains("idx_snap_path_id"));

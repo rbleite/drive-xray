@@ -429,13 +429,28 @@ def full_hash(path: Path) -> bytes | None:
 # Schema v5 — path interning ("Tier 3"):
 #   * new `paths(id, parent_id, segment)` table — each unique directory or
 #     file name lives once. Common prefixes ("Users/rleite/...") shared.
-#   * `entries.path_id` references `paths(id)`. `rel_path` stays as a
-#     denormalized cache column so existing queries keep working unchanged,
+#   * `entries.path_id` references `paths(id)`. `rel_path` stayed as a
+#     denormalized cache column so existing queries kept working unchanged,
 #     but the heavy `UNIQUE INDEX (snapshot_id, rel_path)` is replaced by
 #     `UNIQUE INDEX (snapshot_id, path_id)` — int+int rather than int+text.
 #     On a 770k-file db this typically cuts ~20–25% off the total .db size.
 #   * `paths` is **global** across snapshots: same string ⇒ same path_id,
 #     which also makes `diff` cleaner (path_id equality is a fast int join).
+#
+# Schema v7 — de-duplicated paths ("Snapshots V2", phase 1):
+#   v5 left `rel_path` on every entries row, so the full path text was stored
+#   once *per snapshot per file* even though `paths` already held one row per
+#   distinct path. With weekly snapshots and the default retention (~22 kept)
+#   that is the single largest source of waste in the file — measured at 36%
+#   of the whole entries footprint on realistic 80-char paths.
+#   v7 stores the path text exactly once:
+#   * `paths.full_path` materializes the path (so reads stay a plain int join
+#     instead of a recursive CTE — `parent_id`/`segment` remain the interning
+#     key), and
+#   * the physical table becomes `entries_core`, WITHOUT `rel_path`, while a
+#     VIEW named `entries` re-exposes the original 14 columns in the original
+#     order. Every read query therefore keeps working untouched; only the
+#     write paths (INSERT/UPDATE/DELETE) target `entries_core` directly.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS drive (
     id INTEGER PRIMARY KEY,
@@ -463,16 +478,16 @@ CREATE TABLE IF NOT EXISTS snapshots (
 CREATE TABLE IF NOT EXISTS paths (
     id INTEGER PRIMARY KEY,
     parent_id INTEGER REFERENCES paths(id),
-    segment TEXT NOT NULL
+    segment TEXT NOT NULL,
+    full_path TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_paths_parent_seg
     ON paths(parent_id, segment);
-CREATE TABLE IF NOT EXISTS entries (
+CREATE TABLE IF NOT EXISTS entries_core (
     id INTEGER PRIMARY KEY,
     snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
-    rel_path TEXT NOT NULL,
     path_id INTEGER REFERENCES paths(id),
-    parent_id INTEGER REFERENCES entries(id),
+    parent_id INTEGER REFERENCES entries_core(id),
     is_dir INTEGER NOT NULL,
     size INTEGER,
     mtime REAL,
@@ -483,14 +498,23 @@ CREATE TABLE IF NOT EXISTS entries (
     inode INTEGER,
     device INTEGER
 );
+-- Compatibility view: same 14 columns, same order as the pre-v7 `entries`
+-- table, with rel_path served from `paths`. Reads are unchanged; writes go
+-- to `entries_core` (see _core_writes / the INSERT in index_drive).
+CREATE VIEW IF NOT EXISTS entries AS
+    SELECT c.id, c.snapshot_id, p.full_path AS rel_path, c.path_id,
+           c.parent_id, c.is_dir, c.size, c.mtime, c.partial_hash,
+           c.full_hash, c.is_symlink, c.error, c.inode, c.device
+    FROM entries_core c LEFT JOIN paths p ON p.id = c.path_id;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_snap_path_id
-    ON entries(snapshot_id, path_id);
-CREATE INDEX IF NOT EXISTS idx_snap_parent ON entries(snapshot_id, parent_id);
+    ON entries_core(snapshot_id, path_id);
+CREATE INDEX IF NOT EXISTS idx_snap_parent
+    ON entries_core(snapshot_id, parent_id);
 CREATE INDEX IF NOT EXISTS idx_snap_size_partial
-    ON entries(snapshot_id, size, partial_hash) WHERE is_dir=0;
-CREATE INDEX IF NOT EXISTS idx_full ON entries(full_hash);
+    ON entries_core(snapshot_id, size, partial_hash) WHERE is_dir=0;
+CREATE INDEX IF NOT EXISTS idx_full ON entries_core(full_hash);
 CREATE INDEX IF NOT EXISTS idx_snap_inode
-    ON entries(snapshot_id, inode, device);
+    ON entries_core(snapshot_id, inode, device);
 CREATE TABLE IF NOT EXISTS folder_meta (
     rel_path TEXT PRIMARY KEY,
     tags     TEXT NOT NULL DEFAULT '[]',
@@ -766,7 +790,7 @@ def _migrate_to_v5(conn: sqlite3.Connection) -> bool:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS paths ("
         "id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES paths(id),"
-        " segment TEXT NOT NULL)"
+        " segment TEXT NOT NULL, full_path TEXT)"
     )
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_paths_parent_seg"
@@ -1288,6 +1312,102 @@ def _migrate_to_v6(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def _migrate_to_v7(conn: sqlite3.Connection) -> bool:
+    """v6 → v7: stop storing `rel_path` once per snapshot per file.
+
+    `paths` already holds exactly one row per distinct path (v5 interning),
+    so the text is moved there (`paths.full_path`) and dropped from the
+    per-snapshot rows. The physical table becomes `entries_core`; a VIEW named
+    `entries` re-exposes the original columns so every read query is unchanged.
+
+    Idempotent: returns False once `entries` is already the view.
+    """
+    obj = conn.execute(
+        "SELECT type FROM sqlite_master WHERE name='entries'"
+    ).fetchone()
+    if obj is None:
+        return False           # fresh db — SCHEMA creates v7 directly
+    if obj[0] == "view":
+        return False           # already migrated
+    ent_cols = {r[1] for r in conn.execute("PRAGMA table_info(entries)")}
+    if "path_id" not in ent_cols:
+        return False           # v5 must run first
+
+    print("  migrating .db schema to v7 (de-duplicated paths)...",
+          file=sys.stderr)
+    t0 = time.time()
+
+    path_cols = {r[1] for r in conn.execute("PRAGMA table_info(paths)")}
+    if "full_path" not in path_cols:
+        conn.execute("ALTER TABLE paths ADD COLUMN full_path TEXT")
+
+    # 1. Any row the v5 pass left un-interned would lose its path text when
+    #    rel_path goes away — intern those first.
+    cache: dict[str, int] = {}
+    for eid, rp in conn.execute(
+        "SELECT id, rel_path FROM entries WHERE path_id IS NULL"
+    ).fetchall():
+        conn.execute("UPDATE entries SET path_id=? WHERE id=?",
+                     (intern_path(conn, rp, cache), eid))
+
+    # 2. Move the text: take it from the rows that still carry it. This is the
+    #    source of truth existing queries used, so behaviour is preserved
+    #    byte-for-byte (including any odd characters in names).
+    conn.execute(
+        "UPDATE paths SET full_path = ("
+        "  SELECT e.rel_path FROM entries e"
+        "  WHERE e.path_id = paths.id LIMIT 1)"
+        " WHERE full_path IS NULL"
+    )
+    # 3. Paths not referenced by any entry (orphans from pruned snapshots)
+    #    keep working by reconstructing from the parent/segment chain.
+    conn.execute("""
+        WITH RECURSIVE chain(id, path) AS (
+            SELECT id, '.' FROM paths WHERE parent_id IS NULL
+            UNION ALL
+            SELECT p.id,
+                   CASE WHEN chain.path = '.' THEN p.segment
+                        ELSE chain.path || '/' || p.segment END
+            FROM paths p JOIN chain ON p.parent_id = chain.id
+        )
+        UPDATE paths SET full_path = (SELECT path FROM chain WHERE chain.id = paths.id)
+        WHERE full_path IS NULL
+    """)
+
+    # 4. Rebuild the row store without rel_path, then swap in the view.
+    conn.executescript("""
+        DROP TABLE IF EXISTS entries_core;
+        CREATE TABLE entries_core (
+            id INTEGER PRIMARY KEY,
+            snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+            path_id INTEGER REFERENCES paths(id),
+            parent_id INTEGER REFERENCES entries_core(id),
+            is_dir INTEGER NOT NULL,
+            size INTEGER,
+            mtime REAL,
+            partial_hash BLOB,
+            full_hash BLOB,
+            is_symlink INTEGER DEFAULT 0,
+            error TEXT,
+            inode INTEGER,
+            device INTEGER
+        );
+        INSERT INTO entries_core (id, snapshot_id, path_id, parent_id, is_dir,
+                                  size, mtime, partial_hash, full_hash,
+                                  is_symlink, error, inode, device)
+            SELECT id, snapshot_id, path_id, parent_id, is_dir, size, mtime,
+                   partial_hash, full_hash, is_symlink, error, inode, device
+            FROM entries;
+        DROP TABLE entries;
+    """)
+    conn.commit()
+    n = conn.execute("SELECT COUNT(*) FROM entries_core").fetchone()[0]
+    print(f"    moved {n} rows off rel_path in {time.time()-t0:.1f}s"
+          " — run `dx compact` to reclaim the space",
+          file=sys.stderr)
+    return True
+
+
 def _migrate_windows_seps(conn: sqlite3.Connection) -> None:
     """Older Python-on-Windows indexes stored rel_path with '\\' while the
     Rust engine (and current Python) always store '/'. Normalize in place —
@@ -1303,8 +1423,11 @@ def _migrate_windows_seps(conn: sqlite3.Connection) -> None:
     ).fetchone()[0]
     if not n:
         return
-    conn.execute("UPDATE entries SET rel_path = REPLACE(rel_path, '\\', '/')"
-                 " WHERE rel_path LIKE '%\\%'")
+    # since v7 the path text lives in `paths` (the `entries` view reads it
+    # from there), so rewrite it at the single place it is stored
+    conn.execute("UPDATE paths SET full_path = REPLACE(full_path, '\\', '/'),"
+                 "                 segment   = REPLACE(segment,   '\\', '/')"
+                 " WHERE full_path LIKE '%\\%'")
     conn.execute("UPDATE OR IGNORE folder_meta"
                  " SET rel_path = REPLACE(rel_path, '\\', '/')"
                  " WHERE rel_path LIKE '%\\%'")
@@ -1321,6 +1444,9 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     _migrate_to_v4(conn)
     _migrate_to_v5(conn)
     _migrate_to_v6(conn)
+    # v7 must run BEFORE the SCHEMA script: that script's `CREATE VIEW IF NOT
+    # EXISTS entries` would be skipped while a table of that name still exists.
+    _migrate_to_v7(conn)
     conn.executescript(SCHEMA)
     _migrate_windows_seps(conn)
     # in case `drive` was created without these (very old .db)
@@ -1343,7 +1469,10 @@ def intern_path(conn: sqlite3.Connection, rel_path: str,
                 cache: dict[str, int]) -> int:
     """Return the path_id for `rel_path`, inserting any missing ancestors.
     `cache` is a session-local dict (rel_path → path_id) — share it across
-    a single walk to avoid repeated lookups."""
+    a single walk to avoid repeated lookups.
+
+    Since v7 each row also materializes `full_path`: it is the single place
+    the path text is stored, and the `entries` view serves rel_path from it."""
     if rel_path in cache:
         return cache[rel_path]
     cur = conn.cursor()
@@ -1355,7 +1484,8 @@ def intern_path(conn: sqlite3.Connection, rel_path: str,
             pid = row[0]
         else:
             cur.execute(
-                "INSERT INTO paths (parent_id, segment) VALUES (NULL, '.')"
+                "INSERT INTO paths (parent_id, segment, full_path)"
+                " VALUES (NULL, '.', '.')"
             )
             pid = cur.lastrowid
         cache["."] = pid
@@ -1371,8 +1501,9 @@ def intern_path(conn: sqlite3.Connection, rel_path: str,
         # Try INSERT; on conflict the UNIQUE index returns the existing row.
         try:
             cur.execute(
-                "INSERT INTO paths (parent_id, segment) VALUES (?, ?)",
-                (parent_id, seg),
+                "INSERT INTO paths (parent_id, segment, full_path)"
+                " VALUES (?, ?, ?)",
+                (parent_id, seg, key),
             )
             parent_id = cur.lastrowid
         except sqlite3.IntegrityError:
@@ -1659,7 +1790,7 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
     conn = open_db(db_path)
 
     if mode == "fresh":
-        conn.execute("DELETE FROM entries")
+        conn.execute("DELETE FROM entries_core")
         conn.execute("DELETE FROM snapshots")
         conn.execute("DELETE FROM drive")
         snap_id = insert_snapshot(conn, label, HASH_VERSION,
@@ -1671,12 +1802,12 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
         snap_id = target_snapshot_id or latest_snapshot_id(conn)
         if snap_id is None:
             # nothing to refresh → fall back to fresh
-            conn.execute("DELETE FROM entries")
+            conn.execute("DELETE FROM entries_core")
             conn.execute("DELETE FROM drive")
             snap_id = insert_snapshot(conn, label, HASH_VERSION,
                                       one_fs, skip_cloud)
         else:
-            conn.execute("DELETE FROM entries WHERE snapshot_id=?", (snap_id,))
+            conn.execute("DELETE FROM entries_core WHERE snapshot_id=?", (snap_id,))
             conn.execute(
                 "UPDATE snapshots SET taken_at=?, label=?, hash_version=?,"
                 " opt_one_fs=?, opt_skip_cloud=? WHERE id=?",
@@ -1728,13 +1859,15 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
                partial: bytes | None, full: bytes | None,
                is_symlink: bool, error: str | None,
                inode: int | None = None, device: int | None = None) -> int:
+        # since v7 the path text is stored once, by intern_path, in
+        # `paths.full_path` — the row itself only carries the path_id
         path_id = intern_path(conn, rel_path, path_id_cache)
         cur.execute(
-            "INSERT OR REPLACE INTO entries"
-            " (snapshot_id, rel_path, path_id, parent_id, is_dir, size, mtime,"
+            "INSERT OR REPLACE INTO entries_core"
+            " (snapshot_id, path_id, parent_id, is_dir, size, mtime,"
             "  partial_hash, full_hash, is_symlink, error, inode, device)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (snap_id, rel_path, path_id, parent_id, int(is_dir), size, mtime,
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (snap_id, path_id, parent_id, int(is_dir), size, mtime,
              partial, full, int(is_symlink), error,
              _i64(inode), _i64(device)),
         )
@@ -1962,7 +2095,7 @@ def fill_full_hashes(conn: sqlite3.Connection, root: Path, min_size: int,
                 h = fut.result()
             except Exception:
                 h = None
-            cur.execute("UPDATE entries SET full_hash=? WHERE id=?", (h, rid))
+            cur.execute("UPDATE entries_core SET full_hash=? WHERE id=?", (h, rid))
             done += 1
             if done % 50 == 0:
                 conn.commit()
@@ -2031,7 +2164,7 @@ def compute_dir_hashes(conn: sqlite3.Connection,
 
     for did in dir_ids:
         h = hash_for(did)
-        cur.execute("UPDATE entries SET full_hash=? WHERE id=?", (h, did))
+        cur.execute("UPDATE entries_core SET full_hash=? WHERE id=?", (h, did))
     conn.commit()
 
 
@@ -2240,7 +2373,7 @@ def prune_snapshots(conn: sqlite3.Connection,
     if to_delete:
         placeholders = ",".join("?" * len(to_delete))
         conn.execute(
-            f"DELETE FROM entries WHERE snapshot_id IN ({placeholders})",
+            f"DELETE FROM entries_core WHERE snapshot_id IN ({placeholders})",
             to_delete,
         )
         conn.execute(
@@ -3308,14 +3441,19 @@ def doctor_db(db_path: Path) -> dict:
         return {"ok": False, "checks": checks}
 
     try:
+        # since v7 `entries` is a VIEW over `entries_core`, so views must be
+        # included here or every healthy v7 db reports "missing entries table"
         tables = {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
+            "SELECT name FROM sqlite_master WHERE type IN ('table','view')")}
         has_paths = "paths" in tables
         has_entries = "entries" in tables
         has_snapshots = "snapshots" in tables
         if has_paths and has_entries:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(entries)")}
-            add("schema", "path_id" in cols, "v5/v6 path interning" if "path_id" in cols else "entries.path_id missing")
+            is_v7 = "entries_core" in tables
+            add("schema", "path_id" in cols,
+                ("v7 de-duplicated paths" if is_v7 else "v5/v6 path interning")
+                if "path_id" in cols else "entries.path_id missing")
         else:
             add("schema", False, "missing paths or entries table")
 

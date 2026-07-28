@@ -140,7 +140,7 @@ pub fn prune_snapshots(
             .collect::<Vec<_>>()
             .join(",");
         conn.execute(
-            &format!("DELETE FROM entries WHERE snapshot_id IN ({placeholders})"),
+            &format!("DELETE FROM entries_core WHERE snapshot_id IN ({placeholders})"),
             params_from_iter(to_delete.iter()),
         )?;
         conn.execute(

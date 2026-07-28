@@ -244,7 +244,7 @@ fn allocate_snapshot(
     let stamp = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     match mode {
         Mode::Fresh => {
-            conn.execute("DELETE FROM entries", [])?;
+            conn.execute("DELETE FROM entries_core", [])?;
             conn.execute("DELETE FROM snapshots", [])?;
             conn.execute("DELETE FROM drive", [])?;
             conn.execute(
@@ -269,7 +269,7 @@ fn allocate_snapshot(
             };
             match sid {
                 Some(s) => {
-                    conn.execute("DELETE FROM entries WHERE snapshot_id=?", params![s])?;
+                    conn.execute("DELETE FROM entries_core WHERE snapshot_id=?", params![s])?;
                     conn.execute(
                         r#"UPDATE snapshots SET taken_at=?, label=?, hash_version=?, opt_one_fs=?, opt_skip_cloud=? WHERE id=?"#,
                         params![stamp, label, HASH_VERSION,
@@ -279,7 +279,7 @@ fn allocate_snapshot(
                 }
                 None => {
                     // refresh with no existing snapshot — fall back to fresh
-                    conn.execute("DELETE FROM entries", [])?;
+                    conn.execute("DELETE FROM entries_core", [])?;
                     conn.execute("DELETE FROM drive", [])?;
                     conn.execute(
                         r#"INSERT INTO snapshots (taken_at, label, hash_version, opt_one_fs, opt_skip_cloud) VALUES (?, ?, ?, ?, ?)"#,
@@ -363,7 +363,7 @@ fn hash_update_phase(
         let tx = conn.transaction()?;
         {
             let mut stmt = tx.prepare(
-                "UPDATE entries SET partial_hash=?, full_hash=? WHERE id=?")?;
+                "UPDATE entries_core SET partial_hash=?, full_hash=? WHERE id=?")?;
             for (rid, partial, full, reused) in &computed {
                 if partial.is_some() {
                     n_hashed += 1;
@@ -412,7 +412,7 @@ fn write_structure_phase(
             // a duplicate (snapshot_id, path_id) overwrites rather than
             // aborting the whole index with a UNIQUE violation.
             let mut stmt = tx.prepare(
-                r#"INSERT OR REPLACE INTO entries (snapshot_id, rel_path, path_id, parent_id, is_dir, size, mtime, partial_hash, full_hash, is_symlink, error, inode, device) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"#,
+                r#"INSERT OR REPLACE INTO entries_core (snapshot_id, path_id, parent_id, is_dir, size, mtime, partial_hash, full_hash, is_symlink, error, inode, device) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"#,
             )?;
             for e in &entries[start..end] {
                 let path_id = db::intern_path(&tx, &e.rel_path, &mut path_id_cache)?;
@@ -423,8 +423,10 @@ fn write_structure_phase(
                 let size = e.size.map(|s| s as i64);
                 let none: Option<Vec<u8>> = None;   // hashes filled in phase 3
 
+                // since v7 the path text is stored once, by intern_path, in
+                // `paths.full_path` — the row only carries the path_id
                 stmt.execute(params![
-                    snap_id, e.rel_path, path_id, parent_id, e.is_dir as i64,
+                    snap_id, path_id, parent_id, e.is_dir as i64,
                     size, e.mtime, none, none,
                     e.is_symlink as i64, e.error, inode, device,
                 ])?;

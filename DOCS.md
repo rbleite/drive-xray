@@ -409,6 +409,14 @@ montada. Nota: drives de rede/UNC não são pesquisadas — o caminho gravado
   (iCloud / OneDrive / Google Drive / Dropbox / Box / MEGA / Proton).
 - **Schema v3 compactado** — BLOB hashes, `parent_id` em vez de
   `parent_path`, migração automática de `.db` antigas.
+- **Schema v7 — caminhos deduplicados** (Snapshots V2, fase 1). O texto do
+  caminho deixa de ser guardado uma vez por snapshot por ficheiro e passa a
+  viver uma única vez em `paths.full_path`; a tabela física (`entries_core`)
+  perde o `rel_path` e uma VIEW chamada `entries` reexpõe as 14 colunas
+  originais, pelo que **nenhuma query de leitura mudou**. Medido **30 %
+  menor** (10 000 ficheiros, 5 snapshots, caminhos de 80 caracteres);
+  a poupança cresce com o número de snapshots retidos. Migração automática
+  ao abrir, em qualquer dos motores — depois `dx compact` liberta as páginas.
 - **Refresh incremental** — reutiliza hashes de ficheiros com `(size,
   mtime)` inalterado.
 - **Detecção de hardlinks** via `(inode, device)` — não inflam o
@@ -441,14 +449,31 @@ Reconstrução do caminho via CTE recursiva. Reduz mais ~30-40 %. Custo:
   embebido, ou substituir Streamlit por Svelte/React + backend FastAPI.
 - Code-signing + notarização Apple para correr sem avisos do Gatekeeper.
 
-**Snapshots V2 — content-addressing**
-Cada snapshot guarda hoje a tabela de entries completa (~150 bytes/row).
-Para drives muito grandes (5M+ ficheiros) com snapshots semanais, isto
-escala para ~40 GB/ano. Solução: tabela `file_state(id, size, mtime,
-partial_hash, full_hash)` partilhada entre snapshots, `entries` ganha
-`state_id` e referência o estado real. Para drives com baixa churn
-(típico em bio: dados read-only), reduz ~80 %. Combina naturalmente com
-Tier 3 (path interning).
+**Snapshots V2 — fase 2: content-addressing**
+Cada snapshot guarda a tabela de entries completa. Para drives muito
+grandes (5M+ ficheiros) com snapshots semanais isto escala mal. Solução:
+tabela `file_state(id, size, mtime, partial_hash, full_hash, inode,
+device)` partilhada entre snapshots; `entries_core` ganha `state_id` e
+referencia o estado real.
+
+Medido num índice de ensaio (10 000 ficheiros, 5 snapshots, 1 % de
+churn): **4,8× de deduplicação** (50 405 linhas → 10 481 estados
+distintos), o que vale **~30-41 % do ficheiro** conforme o comprimento
+dos caminhos — não os ~80 % que esta entrada estimava antes de a fase 1
+ter sido medida.
+
+Pontos delicados a resolver na implementação (levantados pela análise):
+- `fill_full_hashes` e `compute_dir_hashes` escrevem hashes *depois* da
+  inserção; com estados partilhados, um `UPDATE` in-place corromperia
+  todas as outras entradas (e outros snapshots) que partilham o estado —
+  tem de ser re-intern + repontar `state_id`.
+- Os hashes Merkle de pastas são função dos *filhos*, não do stat da
+  própria pasta: duas pastas com metadados idênticos não podem partilhar
+  linha de estado.
+- `DELETE`/prune passam a deixar estados órfãos — é preciso GC (o
+  `compact` é o sítio natural).
+- `compare`/`cross_dedupe` operam sobre `.db` diferentes: `state_id` não
+  é comparável entre ficheiros.
 
 **Cleanup v2 — execução in-place**
 Botão "Executar plano" na UI com confirmação dupla (`escrever SIM`),

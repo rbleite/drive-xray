@@ -44,15 +44,15 @@ CREATE TABLE IF NOT EXISTS snapshots (
 CREATE TABLE IF NOT EXISTS paths (
     id INTEGER PRIMARY KEY,
     parent_id INTEGER REFERENCES paths(id),
-    segment TEXT NOT NULL
+    segment TEXT NOT NULL,
+    full_path TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_paths_parent_seg ON paths(parent_id, segment);
-CREATE TABLE IF NOT EXISTS entries (
+CREATE TABLE IF NOT EXISTS entries_core (
     id INTEGER PRIMARY KEY,
     snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
-    rel_path TEXT NOT NULL,
     path_id INTEGER REFERENCES paths(id),
-    parent_id INTEGER REFERENCES entries(id),
+    parent_id INTEGER REFERENCES entries_core(id),
     is_dir INTEGER NOT NULL,
     size INTEGER,
     mtime REAL,
@@ -63,11 +63,19 @@ CREATE TABLE IF NOT EXISTS entries (
     inode INTEGER,
     device INTEGER
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_snap_path_id ON entries(snapshot_id, path_id);
-CREATE INDEX IF NOT EXISTS idx_snap_parent ON entries(snapshot_id, parent_id);
-CREATE INDEX IF NOT EXISTS idx_snap_size_partial ON entries(snapshot_id, size, partial_hash) WHERE is_dir=0;
-CREATE INDEX IF NOT EXISTS idx_full ON entries(full_hash);
-CREATE INDEX IF NOT EXISTS idx_snap_inode ON entries(snapshot_id, inode, device);
+-- Compatibility view: same 14 columns, same order as the pre-v7 `entries`
+-- table, with rel_path served from `paths`. Reads are unchanged; writes go
+-- to `entries_core`. Mirrors the SCHEMA constant in drive_xray.py.
+CREATE VIEW IF NOT EXISTS entries AS
+    SELECT c.id, c.snapshot_id, p.full_path AS rel_path, c.path_id,
+           c.parent_id, c.is_dir, c.size, c.mtime, c.partial_hash,
+           c.full_hash, c.is_symlink, c.error, c.inode, c.device
+    FROM entries_core c LEFT JOIN paths p ON p.id = c.path_id;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_snap_path_id ON entries_core(snapshot_id, path_id);
+CREATE INDEX IF NOT EXISTS idx_snap_parent ON entries_core(snapshot_id, parent_id);
+CREATE INDEX IF NOT EXISTS idx_snap_size_partial ON entries_core(snapshot_id, size, partial_hash) WHERE is_dir=0;
+CREATE INDEX IF NOT EXISTS idx_full ON entries_core(full_hash);
+CREATE INDEX IF NOT EXISTS idx_snap_inode ON entries_core(snapshot_id, inode, device);
 CREATE TABLE IF NOT EXISTS folder_meta (
     rel_path TEXT PRIMARY KEY,
     tags     TEXT NOT NULL DEFAULT '[]',
@@ -106,6 +114,9 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     migrate_to_v3(&conn)?;
     migrate_to_v4(&conn)?;
     migrate_to_v5(&conn)?;
+    // v7 must run BEFORE the schema batch: its `CREATE VIEW IF NOT EXISTS
+    // entries` would be skipped while a table of that name still exists.
+    migrate_to_v7(&conn)?;
 
     // Apply the fresh-db schema (CREATE TABLE / INDEX IF NOT EXISTS).
     conn.execute_batch(SCHEMA_V5)?;
@@ -129,6 +140,107 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "busy_timeout", 5000)?;
 
     Ok(conn)
+}
+
+/// v6 → v7: stop storing `rel_path` once per snapshot per file.
+///
+/// `paths` already holds exactly one row per distinct path (v5 interning), so
+/// the text moves there (`paths.full_path`) and is dropped from the
+/// per-snapshot rows. The physical table becomes `entries_core`; a VIEW named
+/// `entries` re-exposes the original columns, so read queries are unchanged.
+/// Mirrors `_migrate_to_v7` in drive_xray.py — the two must produce the same
+/// layout or the engines stop being interchangeable.
+///
+/// Idempotent: returns false once `entries` is already the view.
+pub fn migrate_to_v7(conn: &Connection) -> Result<bool> {
+    let kind: Option<String> = conn
+        .query_row(
+            "SELECT type FROM sqlite_master WHERE name='entries'",
+            [], |r| r.get(0),
+        )
+        .optional()?;
+    match kind.as_deref() {
+        None => return Ok(false),          // fresh db — schema creates v7
+        Some("view") => return Ok(false),  // already migrated
+        _ => {}
+    }
+    if !column_names(conn, "entries")?.contains("path_id") {
+        return Ok(false); // v5 must run first
+    }
+
+    eprintln!("  migrating .db schema to v7 (de-duplicated paths)...");
+
+    if !column_names(conn, "paths")?.contains("full_path") {
+        conn.execute("ALTER TABLE paths ADD COLUMN full_path TEXT", [])?;
+    }
+
+    // 1. Rows the v5 pass left un-interned would lose their path text when
+    //    rel_path goes away — intern those first.
+    let orphans: Vec<(i64, String)> = {
+        let mut stmt =
+            conn.prepare("SELECT id, rel_path FROM entries WHERE path_id IS NULL")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.filter_map(std::result::Result::ok).collect()
+    };
+    if !orphans.is_empty() {
+        let mut cache: HashMap<String, i64> = HashMap::new();
+        for (id, rel) in orphans {
+            let pid = intern_path_inner(conn, &rel, &mut cache)?;
+            conn.execute("UPDATE entries SET path_id=?1 WHERE id=?2",
+                         params![pid, id])?;
+        }
+    }
+
+    // 2. Move the text from the rows that still carry it — the source of
+    //    truth existing queries used, so behaviour is preserved exactly.
+    conn.execute(
+        "UPDATE paths SET full_path = (
+             SELECT e.rel_path FROM entries e WHERE e.path_id = paths.id LIMIT 1)
+         WHERE full_path IS NULL", [])?;
+    // 3. Paths no entry references (left by pruned snapshots) are rebuilt
+    //    from the parent/segment chain so they keep a usable path.
+    conn.execute(
+        "WITH RECURSIVE chain(id, path) AS (
+             SELECT id, '.' FROM paths WHERE parent_id IS NULL
+             UNION ALL
+             SELECT p.id,
+                    CASE WHEN chain.path = '.' THEN p.segment
+                         ELSE chain.path || '/' || p.segment END
+             FROM paths p JOIN chain ON p.parent_id = chain.id
+         )
+         UPDATE paths SET full_path = (SELECT path FROM chain WHERE chain.id = paths.id)
+         WHERE full_path IS NULL", [])?;
+
+    // 4. Rebuild the row store without rel_path; the view is created by the
+    //    schema batch that runs straight after this.
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS entries_core;
+         CREATE TABLE entries_core (
+             id INTEGER PRIMARY KEY,
+             snapshot_id INTEGER NOT NULL REFERENCES snapshots(id),
+             path_id INTEGER REFERENCES paths(id),
+             parent_id INTEGER REFERENCES entries_core(id),
+             is_dir INTEGER NOT NULL,
+             size INTEGER,
+             mtime REAL,
+             partial_hash BLOB,
+             full_hash BLOB,
+             is_symlink INTEGER DEFAULT 0,
+             error TEXT,
+             inode INTEGER,
+             device INTEGER
+         );
+         INSERT INTO entries_core (id, snapshot_id, path_id, parent_id, is_dir,
+                                   size, mtime, partial_hash, full_hash,
+                                   is_symlink, error, inode, device)
+             SELECT id, snapshot_id, path_id, parent_id, is_dir, size, mtime,
+                    partial_hash, full_hash, is_symlink, error, inode, device
+             FROM entries;
+         DROP TABLE entries;",
+    )?;
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM entries_core", [], |r| r.get(0))?;
+    eprintln!("    moved {n} rows off rel_path — run `dx compact` to reclaim the space");
+    Ok(true)
 }
 
 /// Drop the five `entries` indexes so a bulk delete/insert doesn't pay
@@ -493,7 +605,8 @@ pub fn migrate_to_v5(conn: &Connection) -> Result<bool> {
         CREATE TABLE IF NOT EXISTS paths (
             id INTEGER PRIMARY KEY,
             parent_id INTEGER REFERENCES paths(id),
-            segment TEXT NOT NULL
+            segment TEXT NOT NULL,
+            full_path TEXT
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_paths_parent_seg ON paths(parent_id, segment);
         "#,
@@ -564,7 +677,8 @@ pub(crate) fn intern_path_inner(
             Some(id) => id,
             None => {
                 conn.execute(
-                    "INSERT INTO paths (parent_id, segment) VALUES (NULL, '.')",
+                    "INSERT INTO paths (parent_id, segment, full_path)\
+                     VALUES (NULL, '.', '.')",
                     [],
                 )?;
                 conn.last_insert_rowid()
@@ -585,8 +699,8 @@ pub(crate) fn intern_path_inner(
         }
         // Insert; on UNIQUE conflict the existing row's id is returned.
         let pid: i64 = match conn.execute(
-            "INSERT INTO paths (parent_id, segment) VALUES (?, ?)",
-            rusqlite::params![parent_id, seg],
+            "INSERT INTO paths (parent_id, segment, full_path) VALUES (?, ?, ?)",
+            rusqlite::params![parent_id, seg, key],
         ) {
             Ok(_) => conn.last_insert_rowid(),
             Err(rusqlite::Error::SqliteFailure(_, _)) => conn.query_row(
@@ -655,9 +769,12 @@ fn migrate_windows_seps(conn: &Connection) -> Result<()> {
     if n == 0 {
         return Ok(());
     }
+    // since v7 the path text lives in `paths` (the `entries` view reads
+    // rel_path from there), so rewrite it where it is actually stored
     conn.execute(
-        "UPDATE entries SET rel_path = REPLACE(rel_path, '\\', '/')
-          WHERE rel_path LIKE '%\\%'", [])?;
+        "UPDATE paths SET full_path = REPLACE(full_path, '\\', '/'),
+                          segment   = REPLACE(segment,   '\\', '/')
+          WHERE full_path LIKE '%\\%'", [])?;
     conn.execute(
         "UPDATE OR IGNORE folder_meta SET rel_path = REPLACE(rel_path, '\\', '/')
           WHERE rel_path LIKE '%\\%'", [])?;

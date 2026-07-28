@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Schema v7 — de-duplicated paths** (Snapshots V2, phase 1). Until now the
+  full path text was stored on every `entries` row, i.e. once per snapshot
+  per file, even though the v5 `paths` table already held exactly one row per
+  distinct path. With weekly snapshots and the default retention that was the
+  single largest source of waste in a `.db` — measured at 36% of the whole
+  entries footprint on realistic 80-character paths. v7 stores the text once,
+  in `paths.full_path`, and the physical row store (`entries_core`) drops
+  `rel_path`. A VIEW named `entries` re-exposes the original 14 columns in
+  the original order, so every read query is unchanged; only the write paths
+  target `entries_core`. **Measured 30% smaller** on a 10 000-file / 5-snapshot
+  index with 80-char paths (17% with short paths), and the saving grows with
+  the number of snapshots retained. Existing `.db` files migrate
+  automatically on first open by either engine — run `dx compact` afterwards
+  to reclaim the freed pages. No re-index needed.
+
+  Note: as with every schema bump, update `dx` on **all** machines that share
+  these `.db` files — an older binary cannot read a v7 index.
+
 ### Fixed
 - Cross-OS Unicode normalization (macOS NFD ↔ Windows/Linux NFC). The same
   file has different rel_path bytes depending on the OS that indexed it,

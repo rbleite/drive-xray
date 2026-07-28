@@ -33,16 +33,40 @@ def test_word_forms_differ():
 
 
 def _flip_stored_to_nfd(db: Path, snapshot_id: int | None = None) -> None:
-    """Rewrite stored rel_paths to NFD to simulate a macOS-indexed db."""
+    """Make the stored paths decomposed (NFD), to simulate a macOS-indexed db.
+
+    Since v7 the path text is interned in `paths` and shared by every snapshot
+    that references it, so this mirrors what really happens across a Mac↔
+    Windows sync: each OS interns its own spelling of the name, producing a
+    SEPARATE paths row (the interning key is (parent_id, segment), and the NFD
+    segment differs from the NFC one). When `snapshot_id` is given, only that
+    snapshot's rows are repointed to the NFD twins — the other snapshot keeps
+    the NFC ones, which is exactly the cross-OS skew the diff must reconcile.
+    """
     conn = sqlite3.connect(db)
-    q = "SELECT id, rel_path FROM entries WHERE rel_path != '.'"
-    params: tuple = ()
-    if snapshot_id is not None:
-        q += " AND snapshot_id = ?"
-        params = (snapshot_id,)
-    for rid, rp in conn.execute(q, params).fetchall():
-        if rp != NFD(rp):
-            conn.execute("UPDATE entries SET rel_path=? WHERE id=?", (NFD(rp), rid))
+    rows = conn.execute(
+        "SELECT id, parent_id, segment, full_path FROM paths"
+        " WHERE full_path != '.' ORDER BY LENGTH(full_path)"
+    ).fetchall()
+    twin: dict[int, int] = {}          # NFC path id -> NFD path id
+    for pid, parent, seg, fp in rows:
+        if seg == NFD(seg) and fp == NFD(fp):
+            continue                   # nothing to decompose
+        new_parent = twin.get(parent, parent)
+        cur = conn.execute(
+            "INSERT INTO paths (parent_id, segment, full_path) VALUES (?,?,?)",
+            (new_parent, NFD(seg), NFD(fp)),
+        )
+        twin[pid] = cur.lastrowid
+    if twin:
+        q = "UPDATE entries_core SET path_id=? WHERE path_id=?"
+        params_tail = ""
+        if snapshot_id is not None:
+            q += " AND snapshot_id=?"
+            params_tail = snapshot_id
+        for old, new in twin.items():
+            args = (new, old) if snapshot_id is None else (new, old, params_tail)
+            conn.execute(q, args)
     conn.commit()
     conn.close()
 
