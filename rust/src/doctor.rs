@@ -52,7 +52,19 @@ pub fn doctor(db_path: &Path) -> Result<bool> {
     };
 
     if has_paths && has_path_id {
-        checks.push(Check::pass("schema", "v5 (path interning)"));
+        // v7 stores the path text once in `paths` and exposes `entries` as a
+        // compatibility view over `entries_core`.
+        let is_v7 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='entries' AND type='view'",
+                [], |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0;
+        checks.push(Check::pass(
+            "schema",
+            if is_v7 { "v7 (de-duplicated paths)" } else { "v5 (path interning)" },
+        ));
     } else if has_paths {
         checks.push(Check::fail("schema", "paths table exists but entries.path_id missing — partial v5 migration?"));
     } else {

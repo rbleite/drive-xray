@@ -186,9 +186,10 @@ def test_windows_backslash_db_migrated_and_resolvable(tmp_drive, tmp_path):
     db = tmp_path / "a.db"
     _index(tmp_drive, db)
 
-    # simulate the old Windows-written form
+    # simulate the old Windows-written form (since v7 the path text lives in
+    # `paths`; the `entries` view reads rel_path from there)
     raw = _sq.connect(db)
-    raw.execute("UPDATE entries SET rel_path = REPLACE(rel_path, '/', '\\')")
+    raw.execute("UPDATE paths SET full_path = REPLACE(full_path, '/', '\\')")
     raw.execute("UPDATE drive SET root_path = 'E:\\'")
     raw.commit()
     raw.close()
