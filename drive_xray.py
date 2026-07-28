@@ -34,6 +34,7 @@ import sqlite3
 import stat
 import sys
 import time
+import unicodedata
 from collections import defaultdict
 from pathlib import Path
 
@@ -87,6 +88,24 @@ CLOUD_DIR_PREFIXES = (
 def is_cloud_dir(name: str) -> bool:
     n = name.lower()
     return any(n.startswith(p) for p in CLOUD_DIR_PREFIXES)
+
+
+def nfc(s: str) -> str:
+    """Fold a rel_path to Unicode NFC for cross-OS *comparison* only.
+
+    macOS returns filenames decomposed (NFD: 'ç' = 'c' + combining cedilla),
+    Windows and Linux use composed forms (NFC). The same file therefore has
+    different rel_path *bytes* depending on the OS that indexed it, which
+    silently broke every rel_path-keyed comparison across a Mac↔Windows sync:
+    refresh re-hashed every accented file (reuse-cache miss), snapshot diff
+    showed phantom delete+add pairs, and resolve_root's fingerprint could fail.
+
+    We deliberately do NOT change what is stored: rel_path keeps the exact
+    on-disk bytes the walk read, so any path reconstructed for I/O
+    (root/rel_path) still matches the real file even on normalization-
+    sensitive filesystems (exFAT/FAT), where an NFC lookup of an NFD on-disk
+    name would fail. Only the in-memory comparisons below fold through nfc()."""
+    return unicodedata.normalize("NFC", s)
 
 
 # ---------- local staging for cloud-synced .db files ----------
@@ -1059,6 +1078,28 @@ def notes_get(db_path: Path, rel_path: str) -> str:
     return data.get("drives", {}).get(key, {}).get("folder_notes", {}).get(rel_path, "")
 
 
+def notes_get_all(db_path: Path) -> dict[str, str]:
+    """Return {rel_path: note} for every noted folder in one query. The UI
+    renders one treemap cell per folder and used to call notes_get() (a fresh
+    sqlite connection) for each — hundreds of connect/query/close per rerun on
+    a large drive. Fetch them all at once and look up in memory instead."""
+    if db_path.exists():
+        try:
+            conn = sqlite3.connect(db_path)
+            rows = conn.execute(
+                "SELECT rel_path, note FROM folder_meta"
+                " WHERE note IS NOT NULL AND note != ''"
+            ).fetchall()
+            conn.close()
+            if rows:
+                return {rp: (nt or "") for rp, nt in rows}
+        except Exception:
+            pass
+    data = _registry_load()
+    key = str(db_path.resolve())
+    return dict(data.get("drives", {}).get(key, {}).get("folder_notes", {}))
+
+
 def tags_set(db_path: Path, rel_path: str, tags: list[str],
              note: str | None = None) -> None:
     """Set tags (and optionally note) for a folder. Empty tags+note removes entry.
@@ -1456,21 +1497,33 @@ def _root_fingerprint(conn: sqlite3.Connection, k_names: int = 12,
 def _score_base(base: Path, names: list[str],
                 files: list[tuple[str, int]]) -> tuple[int, int]:
     """(name_hits, file_hits) for a candidate mount point. A file only
-    counts when it exists at the sampled rel_path with the exact size."""
-    name_hits = 0
-    for n in names:
-        try:
-            if (base / n).exists():
-                name_hits += 1
-        except OSError:
-            pass
-    file_hits = 0
-    for rp, sz in files:
-        try:
-            if (base / rp).stat().st_size == sz:
-                file_hits += 1
-        except OSError:
-            pass
+    counts when it exists at the sampled rel_path with the exact size.
+
+    A rel_path stored on one OS (NFD on macOS) is probed against a volume now
+    mounted on another (NFC on disk): we try the exact stored bytes first,
+    then the NFC-folded form, so the sample matches whether the live
+    filesystem is normalization-insensitive (APFS/HFS+) or -sensitive
+    (exFAT/NTFS). Without this, a genuinely-present volume with accented
+    top-level names fails the fingerprint and is reported 'not mounted'."""
+    def _exists(rel: str) -> bool:
+        for cand in (rel, nfc(rel)):
+            try:
+                if (base / cand).exists():
+                    return True
+            except OSError:
+                pass
+        return False
+
+    def _size_of(rel: str) -> int | None:
+        for cand in (rel, nfc(rel)):
+            try:
+                return (base / cand).stat().st_size
+            except OSError:
+                continue
+        return None
+
+    name_hits = sum(1 for n in names if _exists(n))
+    file_hits = sum(1 for rp, sz in files if _size_of(rp) == sz)
     return name_hits, file_hits
 
 
@@ -1746,7 +1799,7 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
                     kept2.append(d)
             dirnames[:] = kept2
         # rel paths are ALWAYS stored with '/' — the .db must be portable
-        # across OSes and byte-identical to the Rust engine's output. Only
+        # across OSes and match the Rust engine's rel_path values. Only
         # Windows needs the fix-up ('\' is the separator there); on POSIX a
         # '\' is a legal filename character and must be left alone.
         def _rel(p: Path) -> str:
@@ -1792,7 +1845,9 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
             size = st.st_size
             partial = full = None
             if reuse_old is not None:
-                cached = reuse_old.get(rel)
+                # fold to NFC so a file indexed on one OS (e.g. NFD on macOS)
+                # matches the same file re-walked on another (NFC on Windows)
+                cached = reuse_old.get(nfc(rel))
                 if cached:
                     old_size, old_mtime, old_partial, old_full = cached
                     # tolerant compare — see _mtimes_equivalent (FAT granularity
@@ -2095,7 +2150,11 @@ def _read_drive_and_cache(db_path: Path) -> tuple[Path, str, bool, bool, dict, i
             "       AND is_symlink=0 AND partial_hash IS NOT NULL",
             (latest_sid,),
         ):
-            old[r[0]] = (r[1], r[2], r[3], r[4])
+            # key by NFC so a drive first indexed on macOS (NFD paths, older
+            # builds) still matches the NFC keys the walk produces now — the
+            # hash reuse survives the one-time upgrade instead of re-hashing
+            # every accented file
+            old[nfc(r[0])] = (r[1], r[2], r[3], r[4])
     conn.close()
     return root, label, one_fs, skip_cloud, old, latest_sid
 
@@ -2235,6 +2294,29 @@ def diff_snapshots(db_path: Path, from_id: int | None = None,
         "   AND (b.size != a.size OR b.partial_hash IS NOT a.partial_hash)",
         (b, a),
     ).fetchall()
+
+    # The path_id join above is byte-exact, so the SAME file snapshotted on
+    # two OSes (NFD on macOS, NFC on Windows — common when the .db is synced
+    # via OneDrive and refreshed from both) has two path_ids and shows up as a
+    # phantom removed+added pair. Reconcile by NFC: an added path whose NFC
+    # form matches a removed path is the same file — drop both (or fold into
+    # modified when the size changed) instead of double-counting it.
+    _removed_by_nfc = {nfc(rp): (rp, sz) for rp, sz in removed}
+    if _removed_by_nfc:
+        _added_keep, _reconciled_add = [], set()
+        for rp, sz in added:
+            key = nfc(rp)
+            match = _removed_by_nfc.get(key)
+            if match is None:
+                _added_keep.append((rp, sz))
+            else:
+                _reconciled_add.add(key)
+                old_sz = match[1]
+                if (old_sz or 0) != (sz or 0):
+                    modified.append((rp, old_sz, sz))
+        added = _added_keep
+        removed = [(rp, sz) for rp, sz in removed
+                   if nfc(rp) not in _reconciled_add]
 
     def top_folder_key(rel: str, depth: int = 2) -> str:
         parts = rel.split("/")

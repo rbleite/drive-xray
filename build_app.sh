@@ -118,6 +118,20 @@ if [[ ! -f "\$APP_PY" ]]; then
     exit 1
 fi
 
+# If drive-xray is already running, open its tab instead of starting a
+# duplicate on the next port — stacked instances (8502, 8503, …) leave
+# stale servers behind and make the browser land on outdated code.
+RUNNING_PID="\$(/usr/bin/pgrep -f "streamlit run \$APP_PY" | head -1 || true)"
+if [[ -n "\$RUNNING_PID" ]]; then
+    RUNNING_PORT="\$(/usr/sbin/lsof -a -p "\$RUNNING_PID" -iTCP -sTCP:LISTEN -P -n 2>/dev/null \\
+        | awk 'NR>1 {sub(/.*:/, "", \$9); print \$9; exit}')"
+    if [[ -n "\$RUNNING_PORT" ]]; then
+        echo "  already running (pid \$RUNNING_PID, port \$RUNNING_PORT) — opening browser" >> "\$LOG"
+        /usr/bin/open "http://localhost:\$RUNNING_PORT"
+        exit 0
+    fi
+fi
+
 # Find a free port if 8501 (or \$DRIVE_XRAY_PORT) is busy. Tries up to 10
 # alternatives so multiple instances can coexist.
 port_free() {

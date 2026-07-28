@@ -7,7 +7,7 @@
 
 use crate::db;
 use crate::hash;
-use crate::util::i64_wrap;
+use crate::util::{self, i64_wrap};
 use crate::walker::{self, RawEntry};
 use crate::HASH_VERSION;
 use anyhow::{anyhow, Context, Result};
@@ -89,7 +89,10 @@ pub fn build_reuse_cache(conn: &Connection) -> Result<ReuseCache> {
         let mtime = match mtime { Some(m) => m, None => continue };
         let partial = partial.and_then(|v| <[u8; 16]>::try_from(v.as_slice()).ok());
         let full = full.and_then(|v| <[u8; 32]>::try_from(v.as_slice()).ok());
-        cache.insert(rp, ReuseEntry { size, mtime, partial, full });
+        // key by NFC so a file indexed on one OS (NFD on macOS) matches the
+        // same file re-walked on another (NFC on Windows). Stored rel_path is
+        // untouched; only this in-memory lookup key is folded.
+        cache.insert(util::nfc(&rp), ReuseEntry { size, mtime, partial, full });
     }
     Ok(cache)
 }
@@ -330,7 +333,7 @@ fn hash_update_phase(
                 //    (see mtimes_equivalent: FAT granularity + exFAT
                 //    local-time hour shifts between OSes)
                 if let Some(cache) = reuse {
-                    if let Some(c) = cache.get(&e.rel_path) {
+                    if let Some(c) = cache.get(&util::nfc(&e.rel_path)) {
                         if c.size == size
                             && mtimes_equivalent(c.mtime, e.mtime.unwrap_or(0.0))
                         {
@@ -405,8 +408,11 @@ fn write_structure_phase(
         let end = (start + BATCH).min(entries.len());
         let tx = conn.transaction()?;
         {
+            // INSERT OR REPLACE mirrors the Python engine (drive_xray.py):
+            // a duplicate (snapshot_id, path_id) overwrites rather than
+            // aborting the whole index with a UNIQUE violation.
             let mut stmt = tx.prepare(
-                r#"INSERT INTO entries (snapshot_id, rel_path, path_id, parent_id, is_dir, size, mtime, partial_hash, full_hash, is_symlink, error, inode, device) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"#,
+                r#"INSERT OR REPLACE INTO entries (snapshot_id, rel_path, path_id, parent_id, is_dir, size, mtime, partial_hash, full_hash, is_symlink, error, inode, device) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"#,
             )?;
             for e in &entries[start..end] {
                 let path_id = db::intern_path(&tx, &e.rel_path, &mut path_id_cache)?;

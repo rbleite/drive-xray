@@ -74,6 +74,13 @@ fn fresh_db_has_v4_schema() {
     assert!(drv_cols.contains("hash_version"));
     assert!(drv_cols.contains("opt_one_fs"));
 
+    // folder_meta (tags/notes) must exist on a fresh Rust db too — the Python
+    // UI assumes it, and migrate_windows_seps touches it.
+    let fm_cols = table_columns(&conn, "folder_meta");
+    for c in ["rel_path", "tags", "note", "updated_at"] {
+        assert!(fm_cols.contains(c), "folder_meta missing column {c}");
+    }
+
     let entry_indexes = index_names(&conn, "entries");
     // v5: the heavy idx_snap_path (UNIQUE on text rel_path) is gone, replaced
     // by idx_snap_path_id (UNIQUE on int path_id).

@@ -213,7 +213,7 @@ pub fn diff(
         v
     };
     // modified: same path, different size OR different partial_hash
-    let modified: Vec<(String, i64, i64)> = {
+    let mut modified: Vec<(String, i64, i64)> = {
         let mut stmt = conn.prepare(
             r#"SELECT b.rel_path, COALESCE(a.size, 0), COALESCE(b.size, 0) FROM entries b JOIN entries a ON a.rel_path=b.rel_path WHERE b.snapshot_id=? AND a.snapshot_id=? AND b.is_dir=0 AND a.is_dir=0 AND (b.size != a.size OR b.partial_hash IS NOT a.partial_hash)"#,
         )?;
@@ -223,6 +223,39 @@ pub fn diff(
         let v: Vec<(String, i64, i64)> = rows.filter_map(Result::ok).collect();
         v
     };
+
+    // The rel_path join above is byte-exact, so the SAME file snapshotted on
+    // two OSes (NFD on macOS, NFC on Windows — common when the .db is synced
+    // and refreshed from both) shows up as a phantom removed+added pair.
+    // Reconcile by NFC: an added path whose NFC form matches a removed path is
+    // the same file — drop both (or fold into modified when the size changed).
+    let (mut added, mut removed) = (added, removed);
+    {
+        use std::collections::HashMap;
+        let removed_by_nfc: HashMap<String, i64> = removed
+            .iter()
+            .map(|(rp, sz)| (crate::util::nfc(rp), *sz))
+            .collect();
+        if !removed_by_nfc.is_empty() {
+            let mut reconciled: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut kept_added: Vec<(String, i64)> = Vec::new();
+            for (rp, sz) in added.into_iter() {
+                let key = crate::util::nfc(&rp);
+                match removed_by_nfc.get(&key) {
+                    Some(&old_sz) => {
+                        reconciled.insert(key);
+                        if old_sz != sz {
+                            modified.push((rp, old_sz, sz));
+                        }
+                    }
+                    None => kept_added.push((rp, sz)),
+                }
+            }
+            added = kept_added;
+            removed.retain(|(rp, _)| !reconciled.contains(&crate::util::nfc(rp)));
+        }
+    }
 
     fn top_key(rel: &str, depth: usize) -> String {
         let parts: Vec<&str> = rel.split('/').collect();
