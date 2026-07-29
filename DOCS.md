@@ -409,6 +409,16 @@ montada. Nota: drives de rede/UNC não são pesquisadas — o caminho gravado
   (iCloud / OneDrive / Google Drive / Dropbox / Box / MEGA / Proton).
 - **Schema v3 compactado** — BLOB hashes, `parent_id` em vez de
   `parent_path`, migração automática de `.db` antigas.
+- **Cleanup v2 — execução in-place.** O assistente de limpeza deixou de
+  ser só um gerador de `.sh`: o plano pode ser executado dentro da app, com
+  diálogo de confirmação (repete as contagens, mostra o destino da quarentena
+  e exige escrever a palavra de confirmação), barra de progresso e resumo no
+  fim. A drive tem de estar montada, a pasta de quarentena é criada antes de
+  qualquer movimento, cada ficheiro é reconfirmado no disco imediatamente
+  antes de agir (o que mudou desde a indexação é ignorado), as acções são
+  confinadas à raiz da drive e tudo fica no log de auditoria. O script e a
+  execução saem do **mesmo** plano (`build_cleanup_plan`), pelo que não podem
+  divergir. A acção por omissão passou a ser a quarentena.
 - **Schema v7 — caminhos deduplicados** (Snapshots V2, fase 1). O texto do
   caminho deixa de ser guardado uma vez por snapshot por ficheiro e passa a
   viver uma única vez em `paths.full_path`; a tabela física (`entries_core`)
@@ -475,11 +485,7 @@ Pontos delicados a resolver na implementação (levantados pela análise):
 - `compare`/`cross_dedupe` operam sobre `.db` diferentes: `state_id` não
   é comparável entre ficheiros.
 
-**Cleanup v2 — execução in-place**
-Botão "Executar plano" na UI com confirmação dupla (`escrever SIM`),
-progress bar e quarentena pré-criada antes de qualquer `mv`. Hoje a UI
-só gera o script; ainda tens de o correr à mão. Esta evolução mantém a
-quarentena como passo intermédio mas remove o atrito.
+
 
 **Detecção de APFS clones**
 Usar `clonefile()` syscall ou `getattrlist` com `ATTR_CMNEXT_FNDRINFO`
