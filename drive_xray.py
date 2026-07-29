@@ -3703,7 +3703,26 @@ def print_doctor(result: dict, db_path: Path) -> None:
 
 # ---------- cli ----------
 
+def _force_utf8_output() -> None:
+    """Make stdout/stderr able to carry the box-drawing and arrow characters
+    this CLI prints.
+
+    On Windows the console encoding defaults to the ANSI code page (cp1252),
+    which has no '↳', '→', '−', '─' or '⚠'. Printing one raises
+    UnicodeEncodeError and kills the command outright — `dedupe` died on its
+    first hardlink note, and `diff`/`doctor` on their summary rules. Switch the
+    streams to UTF-8, and fall back to replacing anything still unencodable so
+    output can never be the thing that fails a run.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass   # not a reconfigurable TextIO (redirected/captured) — fine
+
+
 def main():
+    _force_utf8_output()
     p = argparse.ArgumentParser(prog="drive-xray")
     p.add_argument(
         "--version", action="version",

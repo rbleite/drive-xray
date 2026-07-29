@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deletion.
 
 ### Fixed
+- The CLI crashed on a non-UTF-8 console (i.e. any default Windows console,
+  which uses cp1252): the box-drawing and arrow characters it prints — `↳`,
+  `→`, `−`, `─`, `⚠` — raised `UnicodeEncodeError` and killed the command.
+  `dedupe` died on its first hardlink note, `diff` and `doctor` on their
+  summary rules. stdout/stderr are now switched to UTF-8, falling back to
+  replacing anything still unencodable so output can never be what fails a
+  run.
 - The duplicates list was never refreshed after files were deleted or
   quarantined: the invalidation popped a `dupes_ready` key that does not
   exist, while the cache is keyed per drive. The list kept offering files that
