@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The UI's drive-to-drive comparison counted every file once per snapshot: it
+  read `entries` without a `snapshot_id` filter, so matches inflated by
+  (snapshots in A × snapshots in B) and "only in A" by the number of
+  snapshots in A. Two drives with three snapshots each reported 27 matches
+  and 3 only-in-A where the truth was 3 and 1; on the default retention
+  (~22 snapshots) the figures were off by orders of magnitude, and the UI
+  disagreed with the `dx compare` CLI — which had the filter all along — on
+  the same pair of drives. Both queries now compare the latest snapshot of
+  each drive, matching the CLI.
+
 ### Added
 - **Schema v7 — de-duplicated paths** (Snapshots V2, phase 1). Until now the
   full path text was stored on every `entries` row, i.e. once per snapshot

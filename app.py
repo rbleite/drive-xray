@@ -2535,12 +2535,19 @@ with tab_compare:
                 st.warning(t("hash_version_mismatch",
                              va=va, vb=vb, cur=HASH_VERSION))
             with st.spinner(t("crosschecking")):
+                # Compare the CURRENT state of each drive, i.e. its latest
+                # snapshot — same as the `dx compare` CLI. Without the
+                # snapshot_id filter every file is read once per snapshot, so
+                # matches inflate by (snapshots in A × snapshots in B) and the
+                # "only in A" count by the number of snapshots in A.
                 b_index: dict[tuple[int, str], list[tuple[str, str | None]]] = defaultdict(list)
                 cb = open_db(other)
+                sid_b = latest_snapshot_id(cb)
                 for size, partial, rel, fh in cb.execute(
                     "SELECT size, partial_hash, rel_path, full_hash FROM entries"
-                    " WHERE is_dir=0 AND size >= ? AND partial_hash IS NOT NULL",
-                    (min_size_c,),
+                    " WHERE snapshot_id=? AND is_dir=0 AND size >= ?"
+                    "   AND partial_hash IS NOT NULL",
+                    (sid_b, min_size_c),
                 ):
                     b_index[(size, partial)].append((rel, fh))
                 cb.close()
@@ -2548,10 +2555,12 @@ with tab_compare:
                 matches = []
                 only_a = 0
                 ca = open_db(selected_db)
+                sid_a = latest_snapshot_id(ca)
                 for size, partial, rel_a, fh_a in ca.execute(
                     "SELECT size, partial_hash, rel_path, full_hash FROM entries"
-                    " WHERE is_dir=0 AND size >= ? AND partial_hash IS NOT NULL",
-                    (min_size_c,),
+                    " WHERE snapshot_id=? AND is_dir=0 AND size >= ?"
+                    "   AND partial_hash IS NOT NULL",
+                    (sid_a, min_size_c),
                 ):
                     hits = b_index.get((size, partial))
                     if not hits:
