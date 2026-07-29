@@ -7,7 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Cleanup v2 — run the plan from inside the app.** The assisted cleanup used
+  to only generate a `.sh` you had to review and run by hand; it can now be
+  executed directly, which is the step that actually reclaims the space.
+  Gated deliberately: a confirmation dialog restates the counts, spells out
+  the quarantine destination, and requires typing a confirmation word before
+  anything happens, with a progress bar during the run and a summary after it.
+
+  Safety, all covered by tests: the drive must be mounted (otherwise the run
+  aborts before touching a file); for quarantine the destination folder is
+  created up-front, so a full or unwritable disk fails before any move; every
+  file is re-checked against the index immediately before its action, so
+  anything changed or removed since indexing is skipped rather than acted on;
+  actions are confined to the drive root; and every outcome is appended to the
+  audit log. Groups whose copies are all hardlinks to one another are skipped
+  (deleting them frees nothing) and hardlink siblings of a kept copy are never
+  touched.
+
+  The script and the in-app run are now rendered and executed from the *same*
+  plan object (`build_cleanup_plan`), so what you preview cannot drift from
+  what runs. The default action is now "quarantine" rather than permanent
+  deletion.
+
 ### Fixed
+- The duplicates list was never refreshed after files were deleted or
+  quarantined: the invalidation popped a `dupes_ready` key that does not
+  exist, while the cache is keyed per drive. The list kept offering files that
+  were already gone. This affected the existing "delete selected" flow too.
 - The UI's drive-to-drive comparison counted every file once per snapshot: it
   read `entries` without a `snapshot_id` filter, so matches inflated by
   (snapshots in A × snapshots in B) and "only in A" by the number of

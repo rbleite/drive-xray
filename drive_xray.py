@@ -895,12 +895,18 @@ def execute_file_action(
     action: str,
     root_path: Path | None = None,
     db_path: str = "",
+    quarantine_dir: Path | str | None = None,
+    dest_name: str | None = None,
 ) -> dict:
     """Move a file to quarantine or delete it permanently.
 
     action: "quarantine" | "delete"
     root_path: when supplied, the target must be inside this directory (path
                containment check prevents acting on files outside the drive).
+    quarantine_dir / dest_name: override the destination, so a cleanup plan
+               lands in the same per-run folder and under the same names its
+               generated script would have used. Default to the flat
+               QUARANTINE_DIR and the file's own name.
     Returns {"ok": bool, "full_path": str, "dest": str | None, "error": str | None}.
     Every completed action (ok or error) is appended to AUDIT_LOG.
     """
@@ -940,10 +946,11 @@ def execute_file_action(
 
     try:
         if action == "quarantine":
-            QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
-            dest = QUARANTINE_DIR / p.name
+            qdir = Path(quarantine_dir) if quarantine_dir else QUARANTINE_DIR
+            qdir.mkdir(parents=True, exist_ok=True)
+            dest = qdir / (dest_name or p.name)
             if dest.exists():
-                dest = QUARANTINE_DIR / f"{p.stem}_{int(time.time())}{p.suffix}"
+                dest = qdir / f"{dest.stem}_{int(time.time())}{dest.suffix}"
             shutil.move(str(p), str(dest))
             result = {"ok": True, "full_path": full_path, "dest": str(dest), "error": None}
         else:
@@ -2666,17 +2673,29 @@ CLEANUP_STRATEGIES = ("shortest", "oldest", "newest", "alphabetical")
 CLEANUP_ACTIONS = ("delete", "quarantine")
 
 
-def generate_cleanup_script(db_path: Path, min_size: int,
-                            strategy: str = "shortest",
-                            action: str = "quarantine") -> str:
-    """Produce a shell script proposing actions on duplicate files. The user
-    is expected to review and edit before running it.
+def build_cleanup_plan(db_path: Path, min_size: int,
+                       strategy: str = "shortest",
+                       action: str = "quarantine") -> dict:
+    """Decide what a cleanup would do, as structured data.
+
+    This is the single source of truth for cleanup: `generate_cleanup_script`
+    renders it to bash and `execute_cleanup_plan` performs it, so the script
+    you preview and the actions the app runs can never drift apart.
 
     Strategies pick which copy to KEEP:
       shortest      — shortest rel_path (likely the "main" location)
       oldest        — smallest mtime (the original)
       newest        — largest mtime
       alphabetical  — sorted ascending
+
+    Hardlink safety, preserved from the original script generator:
+      * copies are grouped by (inode, device), so one physical file reachable
+        through several paths counts once;
+      * a group whose paths all share a single inode is skipped entirely —
+        deleting them frees nothing;
+      * hardlink siblings of an acted-on copy are recorded for display only
+        and are never themselves acted on.
+    Group numbers count skipped groups too, so they match the .db's grouping.
     """
     if strategy not in CLEANUP_STRATEGIES:
         raise ValueError(f"unknown strategy: {strategy}")
@@ -2704,32 +2723,7 @@ def generate_cleanup_script(db_path: Path, min_size: int,
     ).fetchall()
 
     stamp = time.strftime("%Y%m%dT%H%M%S")
-    out: list[str] = [
-        "#!/usr/bin/env bash",
-        f"# drive-xray cleanup plan",
-        f"# Drive label : {label}",
-        f"# Drive root  : {root_path}",
-        f"# Generated   : {time.strftime('%Y-%m-%dT%H:%M:%S')}",
-        f"# Strategy    : keep '{strategy}'   (action: {action})",
-        f"# Min size    : {human(min_size)} ({min_size} bytes)",
-        "#",
-        "# Review every line. Comment out (#) anything you want to keep.",
-        "# Hardlinks share storage with another path; lines pointing at",
-        "# hardlinked-but-already-kept inodes are commented out.",
-        "#",
-        "# After review, run with:  bash <this-file>",
-        "",
-        "set -euo pipefail",
-        "",
-    ]
-    if action == "quarantine":
-        out += [
-            f'QUARANTINE="$HOME/.drive-xray-quarantine/{label}-{stamp}"',
-            'mkdir -p "$QUARANTINE"',
-            'echo "moving copies to: $QUARANTINE"',
-            "",
-        ]
-
+    plan_groups: list[dict] = []
     total_freeable = 0
     n_actions = 0
     n_hardlink_notes = 0
@@ -2773,42 +2767,200 @@ def generate_cleanup_script(db_path: Path, min_size: int,
             keeper_idx = min(range(len(reps)), key=lambda i: reps[i][1])
 
         size = reps[0][2]
-        out.append(f"# === Group {gnum}: {len(by_inode)} distinct copies"
-                   f" of {human(size)}  ·  hash={fh.hex()[:12]} ===")
         keeper_rp = reps[keeper_idx][1]
-        out.append(f'#   KEEP   : {keeper_rp}')
-        # note hardlinks to the keeper (no action — already retained)
-        for sib_rp, _, _ in reps[keeper_idx][4]:
-            out.append(f'#   keep↳hl: {sib_rp}  (hardlink to KEEP)')
-            n_hardlink_notes += 1
+        keeper_hardlinks = [sib_rp for sib_rp, _, _ in reps[keeper_idx][4]]
+        n_hardlink_notes += len(keeper_hardlinks)
 
+        actions: list[dict] = []
         for i, (key, rp, sz, mt, siblings) in enumerate(reps):
             if i == keeper_idx:
                 continue
-            full = _shell_quote(f"{root_path}/{rp}")
-            if action == "delete":
-                out.append(f"rm   {full}  # {human(sz)}")
-            else:
-                safe = rp.replace("/", "__").replace(" ", "_")
-                dst_name = _shell_quote(f"g{gnum:04d}_i{i}__{safe}")
-                out.append(f'mv   {full}  "$QUARANTINE"/{dst_name}  # {human(sz)}')
+            safe = rp.replace("/", "__").replace(" ", "_")
+            sib_rels = [sib_rp for sib_rp, _, _ in siblings]
+            actions.append({
+                "rel_path": rp,
+                "full_path": f"{root_path}/{rp}",
+                "size": sz,
+                "mtime": mt,
+                # only meaningful for action="quarantine"
+                "dest_name": f"g{gnum:04d}_i{i}__{safe}",
+                "hardlinks": sib_rels,
+            })
             n_actions += 1
             total_freeable += sz
-            for sib_rp, _, _ in siblings:
+            n_hardlink_notes += len(sib_rels)
+
+        plan_groups.append({
+            "group": gnum,
+            "hash_hex": fh.hex(),
+            "size": size,
+            "n_copies": len(by_inode),
+            "keeper": keeper_rp,
+            "keeper_full_path": f"{root_path}/{keeper_rp}",
+            "keeper_hardlinks": keeper_hardlinks,
+            "actions": actions,
+        })
+
+    conn.close()
+    return {
+        "label": label,
+        "root_path": root_path,
+        "strategy": strategy,
+        "action": action,
+        "min_size": min_size,
+        "stamp": stamp,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        # quarantine target, matching the script's "$HOME/..." expression
+        "quarantine_dir": str(QUARANTINE_DIR / f"{label}-{stamp}"),
+        "groups": plan_groups,
+        "n_actions": n_actions,
+        "n_hardlink_notes": n_hardlink_notes,
+        "total_freeable": total_freeable,
+    }
+
+
+def generate_cleanup_script(db_path: Path, min_size: int,
+                            strategy: str = "shortest",
+                            action: str = "quarantine") -> str:
+    """Build a plan and render it as a shell script (CLI entry point)."""
+    return render_cleanup_script(
+        build_cleanup_plan(db_path, min_size, strategy=strategy, action=action))
+
+
+def render_cleanup_script(plan: dict) -> str:
+    """Render a plan from `build_cleanup_plan` as a shell script the user
+    reviews and runs by hand. The in-app "run plan" button executes this very
+    same plan object, so the script and the app can never disagree."""
+    label, root_path = plan["label"], plan["root_path"]
+    strategy, action = plan["strategy"], plan["action"]
+    min_size = plan["min_size"]
+    out: list[str] = [
+        "#!/usr/bin/env bash",
+        f"# drive-xray cleanup plan",
+        f"# Drive label : {label}",
+        f"# Drive root  : {root_path}",
+        f"# Generated   : {plan['generated_at']}",
+        f"# Strategy    : keep '{strategy}'   (action: {action})",
+        f"# Min size    : {human(min_size)} ({min_size} bytes)",
+        "#",
+        "# Review every line. Comment out (#) anything you want to keep.",
+        "# Hardlinks share storage with another path; lines pointing at",
+        "# hardlinked-but-already-kept inodes are commented out.",
+        "#",
+        "# After review, run with:  bash <this-file>",
+        "",
+        "set -euo pipefail",
+        "",
+    ]
+    if action == "quarantine":
+        out += [
+            f'QUARANTINE="$HOME/.drive-xray-quarantine/{label}-{plan["stamp"]}"',
+            'mkdir -p "$QUARANTINE"',
+            'echo "moving copies to: $QUARANTINE"',
+            "",
+        ]
+
+    for g in plan["groups"]:
+        out.append(f"# === Group {g['group']}: {g['n_copies']} distinct copies"
+                   f" of {human(g['size'])}  ·  hash={g['hash_hex'][:12]} ===")
+        out.append(f"#   KEEP   : {g['keeper']}")
+        for sib_rp in g["keeper_hardlinks"]:
+            out.append(f'#   keep↳hl: {sib_rp}  (hardlink to KEEP)')
+        for a in g["actions"]:
+            full = _shell_quote(a["full_path"])
+            if action == "delete":
+                out.append(f"rm   {full}  # {human(a['size'])}")
+            else:
+                dst_name = _shell_quote(a["dest_name"])
+                out.append(
+                    f'mv   {full}  "$QUARANTINE"/{dst_name}  # {human(a["size"])}')
+            for sib_rp in a["hardlinks"]:
                 sib_full = _shell_quote(f"{root_path}/{sib_rp}")
                 out.append(f"#    ↳ hardlink (same inode, no extra space): "
                            f"{sib_full}")
-                n_hardlink_notes += 1
         out.append("")
 
     out += [
         f"# ── Summary ──────────────────────────────────────",
-        f"# Actions     : {n_actions}",
-        f"# Hardlink notes: {n_hardlink_notes}",
-        f"# Reclaimable : ~{human(total_freeable)} ({total_freeable} bytes)",
+        f"# Actions     : {plan['n_actions']}",
+        f"# Hardlink notes: {plan['n_hardlink_notes']}",
+        f"# Reclaimable : ~{human(plan['total_freeable'])}"
+        f" ({plan['total_freeable']} bytes)",
     ]
-    conn.close()
     return "\n".join(out) + "\n"
+
+
+def execute_cleanup_plan(plan: dict, progress_cb=None,
+                         db_path: str = "") -> dict:
+    """Carry out a plan from `build_cleanup_plan` — the in-app equivalent of
+    running its generated script by hand.
+
+    Safety, in order:
+      * refuses outright if the drive root is not currently mounted, so a
+        stale index can never be applied to the wrong filesystem;
+      * for quarantine, the destination folder is created up-front — if the
+        disk is full or unwritable we fail before touching a single file;
+      * every file is re-checked against the index (`verify_file`) immediately
+        before its action: anything missing, resized, or otherwise changed
+        since indexing is SKIPPED, not acted on;
+      * `execute_file_action` re-checks that the target is inside the drive
+        root and appends every outcome to the audit log.
+
+    Hardlink siblings recorded in the plan are never acted on — they are the
+    same physical file as a copy that is being kept or moved.
+
+    progress_cb(done, total, rel_path) is called before each action so a UI
+    can show progress. Returns a summary dict; nothing is raised for
+    per-file problems, they are reported in `skipped` / `errors`.
+    """
+    root = Path(plan["root_path"])
+    action = plan["action"]
+    result: dict = {
+        "ok": 0, "freed_bytes": 0, "skipped": [], "errors": [],
+        "quarantine_dir": plan["quarantine_dir"] if action == "quarantine" else None,
+        "aborted": None,
+    }
+
+    if not root.is_dir():
+        result["aborted"] = f"drive root not mounted: {root}"
+        return result
+
+    qdir = None
+    if action == "quarantine":
+        qdir = Path(plan["quarantine_dir"])
+        try:
+            qdir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            result["aborted"] = f"cannot create quarantine folder: {exc}"
+            return result
+
+    todo = [(g, a) for g in plan["groups"] for a in g["actions"]]
+    total = len(todo)
+    for i, (grp, act) in enumerate(todo):
+        if progress_cb:
+            progress_cb(i, total, act["rel_path"])
+        # re-verify against the index right before acting: the drive may have
+        # changed since it was walked
+        check = verify_file(root, act["rel_path"], act["size"])
+        if not check["ok"]:
+            result["skipped"].append({
+                "rel_path": act["rel_path"], "reason": check["reason"],
+            })
+            continue
+        r = execute_file_action(
+            check["full_path"], action, root_path=root, db_path=db_path,
+            quarantine_dir=qdir, dest_name=act["dest_name"],
+        )
+        if r["ok"]:
+            result["ok"] += 1
+            result["freed_bytes"] += act["size"]
+        else:
+            result["errors"].append({
+                "rel_path": act["rel_path"], "error": r["error"],
+            })
+    if progress_cb:
+        progress_cb(total, total, "")
+    return result
 
 
 def _shell_quote(s: str) -> str:

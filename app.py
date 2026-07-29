@@ -37,6 +37,7 @@ from drive_xray import (
     open_db, fill_full_hashes, compute_dir_hashes, human,
     get_hash_version, HASH_VERSION, DX_VERSION, _duplicate_rows,
     compute_folder_sizes, generate_cleanup_script,
+    build_cleanup_plan, render_cleanup_script, execute_cleanup_plan,
     CLEANUP_STRATEGIES, CLEANUP_ACTIONS,
     latest_snapshot_id, list_snapshots, diff_snapshots, resolve_root,
     registry_list, registry_remove, registry_register,
@@ -1208,10 +1209,75 @@ if "del_plan" in st.session_state:
                     "errors": [r for r in _results if not r["ok"]],
                 }
                 st.session_state.pop("del_plan", None)
-                st.session_state.pop("dupes_ready", None)  # force re-scan
+                st.session_state.pop(
+                    f"dupes_{st.session_state.get('db_choice_path', '')}", None)  # force re-scan
                 st.rerun()
 
     _del_dialog()
+
+
+# ---------- cleanup-plan execution dialog (Cleanup v2) ----------
+#
+# Deliberately gated: the plan is shown again with its true counts, the
+# quarantine destination is spelled out, and the user must type the
+# confirmation word. Only then does execute_cleanup_plan touch anything — and
+# it re-verifies every file against the index immediately before acting.
+
+if st.session_state.get("cleanup_confirm") and "cleanup_plan" in st.session_state:
+    _xplan = st.session_state["cleanup_plan"]
+
+    @st.dialog(t("cleanup_exec_title"), width="large")
+    def _cleanup_exec_dialog():
+        _n = _xplan["n_actions"]
+        _size = human(_xplan["total_freeable"])
+        _quarantining = _xplan["action"] == "quarantine"
+        if _quarantining:
+            st.warning(t("cleanup_exec_q_warn", n=_n, size=_size))
+            st.caption(t("cleanup_exec_dest"))
+            st.code(_xplan["quarantine_dir"])
+        else:
+            st.error(t("cleanup_exec_d_warn", n=_n, size=_size))
+        st.caption(t("cleanup_exec_keep_note"))
+        st.caption(t("cleanup_exec_recheck"))
+
+        _word = t("cleanup_confirm_word")
+        _typed = st.text_input(t("cleanup_exec_confirm", word=f"**{_word}**"),
+                               key="cleanup_confirm_input")
+        c1, c2 = st.columns(2)
+        if c1.button(t("cancel"), width="stretch", key="cleanup_cancel"):
+            st.session_state.pop("cleanup_confirm", None)
+            st.rerun()
+        # Validate on click rather than with `disabled=`: Streamlit only sees a
+        # text_input's value on the NEXT rerun, so a disabled button would sit
+        # dead right after the user types the word, with no way to tell why.
+        _go = c2.button(t("cleanup_exec_go"), type="primary", width="stretch",
+                        key="cleanup_go")
+        if _go and _typed.strip().upper() != _word:
+            st.warning(t("cleanup_exec_confirm", word=_word))
+        elif _go:
+            _bar = st.progress(0.0)
+            _status = st.empty()
+
+            def _tick(done, total, rel):
+                _bar.progress(done / max(total, 1))
+                if rel:
+                    _status.caption(t("cleanup_exec_running", rel=rel[-60:]))
+
+            _res = execute_cleanup_plan(
+                _xplan, progress_cb=_tick,
+                db_path=str(st.session_state.get("db_choice_path", "")),
+            )
+            st.session_state["cleanup_exec_result"] = _res
+            st.session_state.pop("cleanup_confirm", None)
+            # the plan has been carried out — drop it and force a re-scan so
+            # the UI can't offer to run the same (now stale) plan twice
+            st.session_state.pop("cleanup_plan", None)
+            st.session_state.pop("cleanup_script", None)
+            st.session_state.pop(
+                    f"dupes_{st.session_state.get('db_choice_path', '')}", None)
+            st.rerun()
+
+    _cleanup_exec_dialog()
 
 
 # ---------- info / rename dialog ----------
@@ -1267,7 +1333,8 @@ if "pending_delete" in st.session_state:
             st.session_state.pop("pending_delete", None)
             if st.session_state.get("db_choice_path") == _pending:
                 st.session_state.pop("db_choice_path", None)
-            st.session_state.pop("dupes_ready", None)
+            st.session_state.pop(
+                    f"dupes_{st.session_state.get('db_choice_path', '')}", None)
             st.rerun()
         if c2.button(
             t("cancel"), width="stretch", key="pd_no",
@@ -1431,6 +1498,32 @@ with tab_dupes:
     root_mounted = root_path.exists()
     if not root_mounted:
         st.info(t("drive_not_mounted", root=str(root_path)))
+
+    # Result of a cleanup run. It lives at the very top of the tab, outside the
+    # "duplicates loaded" gate, because finishing a run drops that cache to
+    # force a re-scan — a banner rendered deeper down would be hidden by the
+    # very act of succeeding, leaving the user with no report of what happened.
+    if "cleanup_exec_result" in st.session_state:
+        _r = st.session_state.pop("cleanup_exec_result")
+        if _r.get("aborted"):
+            st.error(t("cleanup_exec_aborted", reason=_r["aborted"]))
+        else:
+            st.success(t("cleanup_exec_done", n=_r["ok"],
+                         size=human(_r["freed_bytes"])))
+            if _r.get("quarantine_dir") and _r["ok"]:
+                st.info(t("cleanup_exec_restore", path=_r["quarantine_dir"]))
+            if _r["skipped"]:
+                st.warning(t("cleanup_exec_skipped", n=len(_r["skipped"])))
+                with st.expander(t("cleanup_preview"), expanded=False):
+                    st.dataframe([{"": s_["rel_path"], "…": s_["reason"]}
+                                  for s_ in _r["skipped"]],
+                                 width="stretch", hide_index=True)
+            if _r["errors"]:
+                st.error(t("cleanup_exec_errors", n=len(_r["errors"])))
+                with st.expander(t("cleanup_preview"), expanded=True):
+                    st.dataframe([{"": e["rel_path"], "…": e["error"]}
+                                  for e in _r["errors"]],
+                                 width="stretch", hide_index=True)
 
     _dupes_key = f"dupes_{selected_db}"
     if _dupes_key not in st.session_state:
@@ -1675,31 +1768,53 @@ with tab_dupes:
         cleanup_action = cc2.selectbox(
             t("cleanup_action"),
             options=list(CLEANUP_ACTIONS),
+            # default to quarantine: since the plan can now be executed from
+            # here, the reversible action must be the one you get by accident
+            index=list(CLEANUP_ACTIONS).index("quarantine"),
             format_func=lambda a: t(f"action_{a}"),
         )
         if st.button(t("cleanup_generate"), key="gen_cleanup"):
-            script = generate_cleanup_script(
+            # build the plan ONCE and keep it: the script shown below and the
+            # in-app run both come from this same object, so what you preview
+            # is exactly what runs
+            _plan = build_cleanup_plan(
                 selected_db, min_size,
                 strategy=cleanup_strategy, action=cleanup_action,
             )
-            st.session_state["cleanup_script"] = script
+            st.session_state["cleanup_plan"] = _plan
+            st.session_state["cleanup_script"] = render_cleanup_script(_plan)
             st.session_state["cleanup_db"] = str(selected_db)
+            st.session_state.pop("cleanup_exec_result", None)
 
         if (st.session_state.get("cleanup_script")
                 and st.session_state.get("cleanup_db") == str(selected_db)):
             script = st.session_state["cleanup_script"]
-            n_actions = sum(1 for l in script.splitlines()
-                            if l.startswith(("rm ", "mv ")))
+            _cplan = st.session_state.get("cleanup_plan") or {}
+            n_actions = _cplan.get("n_actions", 0)
             st.success(t("cleanup_ready", n=n_actions))
             st.download_button(
                 t("cleanup_download"),
                 data=script.encode("utf-8"),
-                file_name=f"{selected_db.stem}-cleanup-{cleanup_action}.sh",
+                file_name=f"{selected_db.stem}-cleanup-{_cplan.get('action')}.sh",
                 mime="text/x-shellscript",
-                type="primary",
             )
             with st.expander(t("cleanup_preview"), expanded=False):
                 st.code(script, language="bash")
+
+            # ----- run the plan in-app (Cleanup v2) -----
+            if n_actions:
+                st.caption(t("cleanup_or_run"))
+                _croot = Path(_cplan["root_path"])
+                if not _croot.is_dir():
+                    st.warning(t("cleanup_not_mounted"))
+                elif st.button(
+                    t("cleanup_exec_btn", n=n_actions,
+                      size=human(_cplan["total_freeable"])),
+                    key="cleanup_exec_btn", type="primary",
+                ):
+                    st.session_state["cleanup_confirm"] = True
+                    st.rerun()
+
 
 # --- TreeMap ---
 with tab_map:
