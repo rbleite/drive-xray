@@ -8,9 +8,10 @@ be reached.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
-import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -151,5 +152,14 @@ def test_execution_is_audited(dup_drive, tmp_path, monkeypatch):
     plan = dx.build_cleanup_plan(db, 1_000_000, "shortest", "quarantine")
     plan["quarantine_dir"] = str(tmp_path / "q")
     dx.execute_cleanup_plan(plan, db_path=str(db))
+
     assert audit.exists(), "every action must leave an audit trail"
-    assert "sub/copy.bin" in audit.read_text()
+    records = [json.loads(l) for l in audit.read_text().splitlines() if l.strip()]
+    assert len(records) == 1, records
+    rec = records[0]
+    # the audit stores the real on-disk path, so it is '\'-separated on
+    # Windows — compare on the path, not on the raw text
+    assert Path(rec["src"]).name == "copy.bin"
+    assert Path(rec["src"]).parent.name == "sub"
+    assert rec["action"] == "quarantine" and rec["ok"] is True
+    assert Path(rec["dest"]).parent == tmp_path / "q"
