@@ -104,6 +104,35 @@ real icon in the Dock and Spotlight.)
 
 ### Windows
 
+**Starting from nothing?** Open PowerShell (Start menu → type `powershell`) and
+paste this one line:
+
+```powershell
+irm https://raw.githubusercontent.com/rbleite/drive-xray/main/install.ps1 | iex
+```
+
+That is the whole install. It needs no Python, no git and no downloads
+beforehand — PowerShell ships with Windows, and the script installs everything
+else itself:
+
+- **Python** (via `winget`, falling back to the official installer) — including
+  the *Add Python to PATH* checkbox that everybody misses;
+- **git**, which the apps use to update themselves later;
+- **drive-xray and media-catalog**, side by side in `%USERPROFILE%\tools`;
+- their virtual environments and dependencies;
+- the optional **fast Rust engine** (`dx.exe`);
+- **Desktop and Start Menu buttons** for both apps.
+
+Re-run the same line any time to update — existing checkouts are pulled, not
+re-cloned, and local edits are never discarded.
+
+Then just double-click **drive-xray** on your Desktop. Index a drive there
+first: media-catalog reads what drive-xray produces, so it has nothing to show
+until a drive has been scanned.
+
+<details>
+<summary>Manual install, or already have Python and git</summary>
+
 Requirements: [Python 3.10+](https://www.python.org/downloads/) — during install, tick **"Add Python to PATH"**.
 
 ```bat
@@ -113,6 +142,12 @@ start.bat
 ```
 
 `start.bat` creates a virtual environment, installs dependencies, and launches the UI — all in one step. Double-click it on subsequent runs.
+
+`install.bat` (double-click) does the full setup above from an existing
+checkout, and takes `-Path`, `-SkipRustEngine`, `-SkipShortcuts` and
+`-Startup`.
+
+</details>
 
 > **Tip:** to index a drive from the CLI on Windows, use the `dx` command in the same terminal:
 > ```bat
