@@ -38,6 +38,7 @@ from drive_xray import (
     get_hash_version, HASH_VERSION, DX_VERSION, _duplicate_rows,
     compute_folder_sizes, generate_cleanup_script,
     build_cleanup_plan, render_cleanup_script, execute_cleanup_plan,
+    default_script_flavor, cleanup_script_suffix,
     CLEANUP_STRATEGIES, CLEANUP_ACTIONS,
     latest_snapshot_id, list_snapshots, diff_snapshots, resolve_root,
     registry_list, registry_remove, registry_register,
@@ -1782,7 +1783,10 @@ with tab_dupes:
                 strategy=cleanup_strategy, action=cleanup_action,
             )
             st.session_state["cleanup_plan"] = _plan
-            st.session_state["cleanup_script"] = render_cleanup_script(_plan)
+            _flavor = default_script_flavor()
+            st.session_state["cleanup_flavor"] = _flavor
+            st.session_state["cleanup_script"] = render_cleanup_script(
+                _plan, flavor=_flavor)
             st.session_state["cleanup_db"] = str(selected_db)
             st.session_state.pop("cleanup_exec_result", None)
 
@@ -1792,14 +1796,19 @@ with tab_dupes:
             _cplan = st.session_state.get("cleanup_plan") or {}
             n_actions = _cplan.get("n_actions", 0)
             st.success(t("cleanup_ready", n=n_actions))
+            # dialect follows the platform: a .sh of E:\... paths would be as
+            # unrunnable on the PC as a .ps1 of /Volumes/... ones on the Mac
+            _flavor = st.session_state.get("cleanup_flavor") or default_script_flavor()
+            _ps = _flavor == "powershell"
             st.download_button(
                 t("cleanup_download"),
                 data=script.encode("utf-8"),
-                file_name=f"{selected_db.stem}-cleanup-{_cplan.get('action')}.sh",
-                mime="text/x-shellscript",
+                file_name=(f"{selected_db.stem}-cleanup-{_cplan.get('action')}"
+                           f"{cleanup_script_suffix(_flavor)}"),
+                mime="text/plain" if _ps else "text/x-shellscript",
             )
             with st.expander(t("cleanup_preview"), expanded=False):
-                st.code(script, language="bash")
+                st.code(script, language="powershell" if _ps else "bash")
 
             # ----- run the plan in-app (Cleanup v2) -----
             if n_actions:

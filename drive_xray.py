@@ -2827,16 +2827,62 @@ def generate_cleanup_script(db_path: Path, min_size: int,
         build_cleanup_plan(db_path, min_size, strategy=strategy, action=action))
 
 
-def render_cleanup_script(plan: dict) -> str:
-    """Render a plan from `build_cleanup_plan` as a shell script the user
-    reviews and runs by hand. The in-app "run plan" button executes this very
-    same plan object, so the script and the app can never disagree."""
+CLEANUP_FLAVORS = ("bash", "powershell")
+
+
+def default_script_flavor() -> str:
+    """Which dialect to render for. Follows the platform we are running on,
+    not the one that indexed the drive: a plan's paths are resolved for *this*
+    machine, so a .ps1 full of /Volumes/... paths — or a .sh full of E:\\... —
+    could never be run anywhere."""
+    return "powershell" if os.name == "nt" else "bash"
+
+
+def cleanup_script_suffix(flavor: str) -> str:
+    return ".ps1" if flavor == "powershell" else ".sh"
+
+
+def render_cleanup_script(plan: dict, flavor: str | None = None) -> str:
+    """Render a plan from `build_cleanup_plan` as a script the user reviews
+    and runs by hand. The in-app "run plan" button executes this very same
+    plan object, so the script and the app can never disagree.
+
+    Both dialects are emitted from one walk over the plan, so they cannot come
+    to cover different actions either.
+
+    The PowerShell flavour uses -LiteralPath throughout. This is not a style
+    choice: Remove-Item/Move-Item treat [ ] in -Path as a wildcard character
+    class, so `Remove-Item 'IMG[1].jpg'` matches nothing and silently leaves
+    the duplicate behind — and names of that shape are everywhere in photo
+    collections. -LiteralPath takes the name exactly as written.
+    """
+    flavor = flavor or default_script_flavor()
+    if flavor not in CLEANUP_FLAVORS:
+        raise ValueError(f"unknown flavor {flavor!r}")
+    ps = flavor == "powershell"
+
     label, root_path = plan["label"], plan["root_path"]
     strategy, action = plan["strategy"], plan["action"]
     min_size = plan["min_size"]
-    out: list[str] = [
-        "#!/usr/bin/env bash",
-        f"# drive-xray cleanup plan",
+    q = _ps_quote if ps else _shell_quote
+    sep = "\\" if ps else "/"
+    # keep the PowerShell flavour's own furniture ASCII: Windows PowerShell
+    # 5.1 is still the default shell and only reads UTF-8 reliably via the BOM
+    # we prepend below. File names may well be accented and must survive, but
+    # there is no reason to spend that risk on decoration too.
+    hl, rule, dot = ("->", "-" * 48, "*") if ps else ("↳", "─" * 48, "·")
+
+    out: list[str] = []
+    if ps:
+        out += [
+            "# drive-xray cleanup plan",
+        ]
+    else:
+        out += [
+            "#!/usr/bin/env bash",
+            f"# drive-xray cleanup plan",
+        ]
+    out += [
         f"# Drive label : {label}",
         f"# Drive root  : {root_path}",
         f"# Generated   : {plan['generated_at']}",
@@ -2847,47 +2893,83 @@ def render_cleanup_script(plan: dict) -> str:
         "# Hardlinks share storage with another path; lines pointing at",
         "# hardlinked-but-already-kept inodes are commented out.",
         "#",
-        "# After review, run with:  bash <this-file>",
-        "",
-        "set -euo pipefail",
-        "",
     ]
-    if action == "quarantine":
+    if ps:
         out += [
-            f'QUARANTINE="$HOME/.drive-xray-quarantine/{label}-{plan["stamp"]}"',
-            'mkdir -p "$QUARANTINE"',
-            'echo "moving copies to: $QUARANTINE"',
+            "# Paths are passed as -LiteralPath, so names containing [ ] are",
+            "# taken literally instead of as wildcards.",
+            "#",
+            "# After review, run with:",
+            "#   Unblock-File <this-file>   # clears the downloaded-file block",
+            "#   powershell -ExecutionPolicy Bypass -File <this-file>",
+            "",
+            "$ErrorActionPreference = 'Stop'",
+            "",
+        ]
+    else:
+        out += [
+            "# After review, run with:  bash <this-file>",
+            "",
+            "set -euo pipefail",
             "",
         ]
 
+    if action == "quarantine":
+        qrel = f".drive-xray-quarantine{sep}{label}-{plan['stamp']}"
+        if ps:
+            out += [
+                f"$QUARANTINE = Join-Path $HOME {_ps_quote(qrel)}",
+                "New-Item -ItemType Directory -Force -Path $QUARANTINE | Out-Null",
+                'Write-Host "moving copies to: $QUARANTINE"',
+                "",
+            ]
+        else:
+            out += [
+                f'QUARANTINE="$HOME/{qrel}"',
+                'mkdir -p "$QUARANTINE"',
+                'echo "moving copies to: $QUARANTINE"',
+                "",
+            ]
+
     for g in plan["groups"]:
         out.append(f"# === Group {g['group']}: {g['n_copies']} distinct copies"
-                   f" of {human(g['size'])}  ·  hash={g['hash_hex'][:12]} ===")
+                   f" of {human(g['size'])}  {dot}  hash={g['hash_hex'][:12]} ===")
         out.append(f"#   KEEP   : {g['keeper']}")
         for sib_rp in g["keeper_hardlinks"]:
-            out.append(f'#   keep↳hl: {sib_rp}  (hardlink to KEEP)')
+            out.append(f'#   keep{hl}hl: {sib_rp}  (hardlink to KEEP)')
         for a in g["actions"]:
-            full = _shell_quote(a["full_path"])
+            full = q(a["full_path"])
             if action == "delete":
-                out.append(f"rm   {full}  # {human(a['size'])}")
-            else:
-                dst_name = _shell_quote(a["dest_name"])
                 out.append(
+                    f"Remove-Item -LiteralPath {full}  # {human(a['size'])}"
+                    if ps else
+                    f"rm   {full}  # {human(a['size'])}")
+            else:
+                dst_name = q(a["dest_name"])
+                out.append(
+                    f"Move-Item -LiteralPath {full} -Destination "
+                    f"(Join-Path $QUARANTINE {dst_name})  # {human(a['size'])}"
+                    if ps else
                     f'mv   {full}  "$QUARANTINE"/{dst_name}  # {human(a["size"])}')
             for sib_rp in a["hardlinks"]:
-                sib_full = _shell_quote(f"{root_path}/{sib_rp}")
-                out.append(f"#    ↳ hardlink (same inode, no extra space): "
+                sib_full = q(f"{root_path}{sep}{sib_rp.replace('/', sep)}"
+                             if ps else f"{root_path}/{sib_rp}")
+                out.append(f"#    {hl} hardlink (same inode, no extra space): "
                            f"{sib_full}")
         out.append("")
 
     out += [
+        f"# -- Summary {rule[:38]}" if ps else
         f"# ── Summary ──────────────────────────────────────",
         f"# Actions     : {plan['n_actions']}",
         f"# Hardlink notes: {plan['n_hardlink_notes']}",
         f"# Reclaimable : ~{human(plan['total_freeable'])}"
         f" ({plan['total_freeable']} bytes)",
     ]
-    return "\n".join(out) + "\n"
+    text = "\n".join(out) + "\n"
+    # UTF-8 BOM: without it Windows PowerShell 5.1 decodes the file as the
+    # ANSI code page and mangles every accented file name in it.
+    return "\ufeff" + text if ps else text
 
 
 def execute_cleanup_plan(plan: dict, progress_cb=None,
@@ -2966,6 +3048,16 @@ def execute_cleanup_plan(plan: dict, progress_cb=None,
 def _shell_quote(s: str) -> str:
     """Conservative single-quote shell escape."""
     return "'" + s.replace("'", "'\\''") + "'"
+
+
+def _ps_quote(s: str) -> str:
+    """PowerShell single-quoted literal.
+
+    Inside '...' PowerShell expands nothing — not $, not the backtick — and
+    the only escape is a doubled quote. That makes this safe for Windows
+    paths, whose backslashes would need doubling in a "..." string.
+    """
+    return "'" + s.replace("'", "''") + "'"
 
 
 # ---------- compact ----------
