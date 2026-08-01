@@ -8,6 +8,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The cleanup script is now generated in the dialect of the machine it will
+  run on**: PowerShell (`.ps1`) on Windows, bash (`.sh`) elsewhere. A plan's
+  paths are resolved for the current machine, so the `.sh` the app used to
+  hand a Windows user — `#!/usr/bin/env bash`, `rm`, `mv`, against `E:\...`
+  paths — could not be run there at all.
+
+  Both dialects are emitted from a single walk over the plan, so they cannot
+  come to cover different actions.
+
+  Three Windows-specific traps, each with a test:
+  - **`-LiteralPath`, never `-Path`.** `Remove-Item`/`Move-Item` treat `[ ]`
+    in `-Path` as a wildcard character class, so `Remove-Item 'IMG[1].jpg'`
+    matches nothing — and, verified against PowerShell 7.4, *raises no error
+    while doing it*. `$ErrorActionPreference = 'Stop'` cannot catch what never
+    fails. A script of those would report success and leave every duplicate on
+    disk. Names of that shape are common in photo collections.
+  - **Quoting.** PowerShell expands nothing inside `'...'` and its only escape
+    is a doubled quote, so backslash-escaping (correct for bash) would end the
+    string early and change which file a line acts on. Round-tripped in tests
+    against a name carrying `[ ]`, an apostrophe, `$`, a backtick and an accent.
+  - **UTF-8 BOM.** Windows PowerShell 5.1 is still the default shell and
+    decodes a BOM-less file as the ANSI code page, mangling accented file
+    names. The `.ps1` decoration is kept ASCII for the same reason; only file
+    names carry non-ASCII.
+
+  Verified end-to-end by running generated scripts under a real PowerShell:
+  both actions exit clean, act on exactly the planned files, and leave the
+  keepers untouched.
+
 - **Cleanup v2 — run the plan from inside the app.** The assisted cleanup used
   to only generate a `.sh` you had to review and run by hand; it can now be
   executed directly, which is the step that actually reclaims the space.
@@ -31,6 +60,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deletion.
 
 ### Fixed
+- An empty cleanup plan no longer reads as "nothing to clean". The Duplicates
+  tab groups by `(size, partial_hash)` and shows unconfirmed matches, while
+  cleanup deliberately requires a stored `full_hash` before it will act on
+  anything — two files sharing a size and their first/last 64 KiB are only
+  *probably* identical, which is no basis for deleting. On an index made
+  without `--full` those two facts combined into a green "plan generated: 0
+  actions" on a drive showing tens of gigabytes of duplicates. The plan now
+  reports how many candidate groups (and how many bytes) were held back, and
+  the UI explains the gap and points at the confirm-with-full-hash step
+  instead of claiming success.
 - The CLI crashed on a non-UTF-8 console (i.e. any default Windows console,
   which uses cp1252): the box-drawing and arrow characters it prints — `↳`,
   `→`, `−`, `─`, `⚠` — raised `UnicodeEncodeError` and killed the command.
