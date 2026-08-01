@@ -281,6 +281,13 @@ TRANSLATIONS = {
         "action_delete": "Apagar (rm — irreversível!)",
         "cleanup_generate": "Gerar plano",
         "cleanup_ready": "✅ Plano gerado: {n} acções propostas.",
+        "cleanup_unconfirmed": (
+            "Nenhuma acção proposta, mas há {n} grupo(s) por confirmar "
+            "(~{size}). A limpeza só age sobre duplicados confirmados por "
+            "hash completo — dois ficheiros com o mesmo tamanho e os mesmos "
+            "extremos são *provavelmente* iguais, e isso não chega para "
+            "apagar nada. Corre \"Confirmar com hash completo\" acima e "
+            "gera o plano outra vez."),
         "cleanup_download": "⬇️ Descarregar script .sh",
         "cleanup_preview": "Pré-visualizar script",
         # ── executar o plano dentro da app (Cleanup v2) ──
@@ -637,6 +644,12 @@ TRANSLATIONS = {
         "action_delete": "Delete (rm — irreversible!)",
         "cleanup_generate": "Generate plan",
         "cleanup_ready": "✅ Plan generated: {n} proposed actions.",
+        "cleanup_unconfirmed": (
+            "No actions proposed, but {n} group(s) are unconfirmed (~{size}). "
+            "Cleanup only acts on duplicates confirmed by full hash — two "
+            "files sharing a size and their first/last 64 KiB are *probably* "
+            "identical, and that is not enough to delete anything. Run "
+            "\"Confirm with full hash\" above, then generate the plan again."),
         "cleanup_download": "⬇️ Download .sh script",
         "cleanup_preview": "Preview script",
         # ── run the plan in-app (Cleanup v2) ──

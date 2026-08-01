@@ -2801,6 +2801,28 @@ def build_cleanup_plan(db_path: Path, min_size: int,
             "actions": actions,
         })
 
+    # Why the plan can be empty while the Duplicates tab is full.
+    #
+    # That list groups by (size, partial_hash) — the cheap filter — and shows
+    # unconfirmed matches as '≈'. Cleanup deliberately refuses to act on those:
+    # two files sharing a size and their first/last 64 KiB are *probably*
+    # identical, and "probably" is not a basis for deleting anything. So it
+    # requires a stored full_hash, which an index made without --full does not
+    # have until the confirm step runs.
+    #
+    # Left unsaid, that produced a plan of 0 actions on a drive with tens of
+    # gigabytes of duplicates, which reads as "nothing to clean". Count what
+    # was held back so the caller can say so instead.
+    unconfirmed = conn.execute(
+        "SELECT size, COUNT(*) c FROM entries"
+        " WHERE snapshot_id=? AND is_dir=0 AND size >= ?"
+        "   AND partial_hash IS NOT NULL AND full_hash IS NULL"
+        " GROUP BY size, partial_hash HAVING c > 1",
+        (sid, min_size),
+    ).fetchall()
+    n_unconfirmed_groups = len(unconfirmed)
+    unconfirmed_bytes = sum(sz * (c - 1) for sz, c in unconfirmed)
+
     conn.close()
     return {
         "label": label,
@@ -2816,15 +2838,24 @@ def build_cleanup_plan(db_path: Path, min_size: int,
         "n_actions": n_actions,
         "n_hardlink_notes": n_hardlink_notes,
         "total_freeable": total_freeable,
+        # candidates excluded for want of a confirmed full hash
+        "n_unconfirmed_groups": n_unconfirmed_groups,
+        "unconfirmed_bytes": unconfirmed_bytes,
     }
 
 
 def generate_cleanup_script(db_path: Path, min_size: int,
                             strategy: str = "shortest",
-                            action: str = "quarantine") -> str:
-    """Build a plan and render it as a shell script (CLI entry point)."""
+                            action: str = "quarantine",
+                            flavor: str | None = None) -> str:
+    """Build a plan and render it as a script (CLI entry point).
+
+    flavor defaults to the platform's, so `dx cleanup` on Windows writes
+    PowerShell without the user having to ask.
+    """
     return render_cleanup_script(
-        build_cleanup_plan(db_path, min_size, strategy=strategy, action=action))
+        build_cleanup_plan(db_path, min_size, strategy=strategy, action=action),
+        flavor=flavor)
 
 
 CLEANUP_FLAVORS = ("bash", "powershell")

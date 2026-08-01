@@ -54,16 +54,20 @@ def test_plan_skips_hardlink_only_groups(dup_drive):
 def test_script_and_plan_cannot_drift(dup_drive):
     """The script the user downloads is rendered from the plan the app runs."""
     _, db = dup_drive
+    # the acting verbs differ per dialect, and the dialect follows the host —
+    # so pin both explicitly rather than assuming the one this OS renders
+    verbs = {"bash": ("rm ", "mv "), "powershell": ("Remove-Item", "Move-Item")}
     for action in ("quarantine", "delete"):
         for strategy in ("shortest", "oldest", "newest", "alphabetical"):
             plan = build_cleanup_plan(db, 1_000_000, strategy, action)
-            assert render_cleanup_script(plan).count("\n") > 0
-            # the standalone generator must agree with the plan's action count
-            script = generate_cleanup_script(db, 1_000_000, strategy=strategy,
-                                             action=action)
-            n_cmds = sum(1 for l in script.splitlines()
-                         if l.startswith(("rm ", "mv ")))
-            assert n_cmds == plan["n_actions"]
+            for flavor, starts in verbs.items():
+                assert render_cleanup_script(plan, flavor=flavor).count("\n") > 0
+                # the standalone generator must agree with the plan's count
+                script = generate_cleanup_script(db, 1_000_000, strategy=strategy,
+                                                 action=action, flavor=flavor)
+                n_cmds = sum(1 for l in script.splitlines()
+                             if l.startswith(starts))
+                assert n_cmds == plan["n_actions"], (flavor, strategy, action)
 
 
 def test_quarantine_keeps_one_copy_and_spares_hardlinks(dup_drive, tmp_path):
@@ -163,3 +167,32 @@ def test_execution_is_audited(dup_drive, tmp_path, monkeypatch):
     assert Path(rec["src"]).parent.name == "sub"
     assert rec["action"] == "quarantine" and rec["ok"] is True
     assert Path(rec["dest"]).parent == tmp_path / "q"
+
+
+def test_empty_plan_explains_itself_when_matches_are_unconfirmed(tmp_path):
+    """A drive full of duplicates must never yield a bare '0 actions'.
+
+    The Duplicates tab groups by (size, partial_hash) and shows unconfirmed
+    matches; cleanup deliberately requires a stored full_hash before it will
+    act. Without that gap being reported, a plan of 0 actions on a drive with
+    tens of gigabytes of duplicates reads as "nothing to clean".
+    """
+    import drive_xray as dx
+    drv = tmp_path / "drive"
+    (drv / "sub").mkdir(parents=True)
+    (drv / "a.bin").write_bytes(b"A" * 2_000_000)
+    shutil.copy(drv / "a.bin", drv / "sub" / "a_copy.bin")
+    db = tmp_path / "u.db"
+    # indexed WITHOUT --full, as the UI does by default
+    assert dx_py("index", str(drv), "--db", str(db), "--label", "U").returncode == 0
+
+    plan = dx.build_cleanup_plan(db, 1_000_000, "shortest", "quarantine")
+    assert plan["n_actions"] == 0, "unconfirmed matches must not be acted on"
+    assert plan["n_unconfirmed_groups"] == 1
+    assert plan["unconfirmed_bytes"] >= 2_000_000
+
+    # after confirmation the same plan has work to do and nothing held back
+    assert dx_py("dedupe", str(db), "--min-size", "1000000").returncode == 0
+    plan2 = dx.build_cleanup_plan(db, 1_000_000, "shortest", "quarantine")
+    assert plan2["n_actions"] == 1
+    assert plan2["n_unconfirmed_groups"] == 0

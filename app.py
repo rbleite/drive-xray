@@ -1795,7 +1795,14 @@ with tab_dupes:
             script = st.session_state["cleanup_script"]
             _cplan = st.session_state.get("cleanup_plan") or {}
             n_actions = _cplan.get("n_actions", 0)
-            st.success(t("cleanup_ready", n=n_actions))
+            _unconf = _cplan.get("n_unconfirmed_groups", 0)
+            if n_actions == 0 and _unconf:
+                # an empty plan on a drive full of duplicates is not "nothing
+                # to clean" — say which candidates were held back and why
+                st.warning(t("cleanup_unconfirmed", n=_unconf,
+                             size=human(_cplan.get("unconfirmed_bytes", 0))))
+            else:
+                st.success(t("cleanup_ready", n=n_actions))
             # dialect follows the platform: a .sh of E:\... paths would be as
             # unrunnable on the PC as a .ps1 of /Volumes/... ones on the Mac
             _flavor = st.session_state.get("cleanup_flavor") or default_script_flavor()

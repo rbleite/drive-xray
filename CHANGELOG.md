@@ -60,6 +60,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deletion.
 
 ### Fixed
+- An empty cleanup plan no longer reads as "nothing to clean". The Duplicates
+  tab groups by `(size, partial_hash)` and shows unconfirmed matches, while
+  cleanup deliberately requires a stored `full_hash` before it will act on
+  anything — two files sharing a size and their first/last 64 KiB are only
+  *probably* identical, which is no basis for deleting. On an index made
+  without `--full` those two facts combined into a green "plan generated: 0
+  actions" on a drive showing tens of gigabytes of duplicates. The plan now
+  reports how many candidate groups (and how many bytes) were held back, and
+  the UI explains the gap and points at the confirm-with-full-hash step
+  instead of claiming success.
 - The CLI crashed on a non-UTF-8 console (i.e. any default Windows console,
   which uses cp1252): the box-drawing and arrow characters it prints — `↳`,
   `→`, `−`, `─`, `⚠` — raised `UnicodeEncodeError` and killed the command.
