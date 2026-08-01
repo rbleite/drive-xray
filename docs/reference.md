@@ -495,7 +495,7 @@ sobrestimar.
 
 ### Rust port
 
-🎉 **Sprints 1-5 entregues.** O binário `dx` em [`rust/`](rust/) é
+🎉 **Sprints 1-5 entregues.** O binário `dx` em [`rust/`](../rust/) é
 drop-in compatível com a CLI Python (mesmos subcommandos, `.db` v4
 **logicamente equivalente** — mesmas linhas, mesmos hashes; a ordem de
 inserção das linhas pode diferir, por isso o ficheiro não é garantido
@@ -532,7 +532,7 @@ lipo -create -output target/universal/dx \
 A app procura o binário nesta ordem: `$DRIVE_XRAY_DX` env var →
 `rust/target/{universal,release}/dx` → `dx` no PATH → fallback Python.
 
-Detalhes técnicos completos: [`rust/DESIGN.md`](rust/DESIGN.md).
+Detalhes técnicos completos: [`rust/DESIGN.md`](../rust/DESIGN.md).
 
 
 
@@ -597,7 +597,7 @@ Notas técnicas críticas para a transição:
 
 - **mtime byte-equivalence** — verificada empiricamente: a fórmula
   CPython `tv_sec + tv_nsec * 1e-9` está implementada de forma
-  bit-idêntica em [`rust/src/walker.rs`](rust/src/walker.rs), com
+  bit-idêntica em [`rust/src/walker.rs`](../rust/src/walker.rs), com
   test de regressão em `tests/db_parity.rs`. SQLite `REAL` preserva
   o IEEE 754 round-trip.
 - **inode/device wrap u64→i64** para exFAT/NTFS/APFS com IDs altos —

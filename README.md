@@ -70,220 +70,78 @@ The drive can be unplugged — the x-ray keeps answering.
 - 🦀 **Optional Rust engine** for large drives — ~10× faster on
   5 M files, **byte-for-byte** compatible `.db` files.
 
-macOS-specific defenses:
-
-- `--one-filesystem` avoids traversing APFS firmlinks (so your files
-  aren't double-counted via `/System/Volumes/Data`).
-- `--skip-cloud` ignores iCloud / OneDrive / Google Drive / Dropbox /
-  Box / MEGA / Proton folders — doesn't trigger downloads of
-  online-only files.
+On macOS it also avoids two classic traps: APFS firmlinks (which would
+double-count your files) and cloud folders (indexing them would trigger
+downloads of online-only files).
 
 ---
 
-## Quick install
+## Install
+
+### Windows
+
+Open PowerShell (Start menu → type `powershell`) and paste this one line:
+
+```powershell
+irm https://raw.githubusercontent.com/rbleite/drive-xray/main/install.ps1 | iex
+```
+
+That is the whole install, on a machine with **nothing** on it. PowerShell
+ships with Windows; the script installs Python, git, drive-xray and
+[media-catalog](https://github.com/rbleite/media-catalog), and leaves you a
+**button on your Desktop**. Run the same line again any time to update.
 
 ### macOS / Linux
 
 ```bash
 git clone https://github.com/rbleite/drive-xray.git
 cd drive-xray
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/streamlit run app.py
-```
-
-Or build a **clickable `.app` launcher** (recommended for daily use):
-
-```bash
 bash build_app.sh
 open ~/Applications/drive-xray.app
 ```
 
-(The launcher auto-opens your browser at http://localhost:8501, with a
-real icon in the Dock and Spotlight.)
+That builds a double-click launcher with a real icon in the Dock and
+Spotlight. It opens your browser at http://localhost:8501.
 
-### Windows
-
-**Starting from nothing?** Open PowerShell (Start menu → type `powershell`) and
-paste this one line:
-
-```powershell
-irm https://raw.githubusercontent.com/rbleite/drive-xray/main/install.ps1 | iex
-```
-
-That is the whole install. It needs no Python, no git and no downloads
-beforehand — PowerShell ships with Windows, and the script installs everything
-else itself:
-
-- **Python** (via `winget`, falling back to the official installer) — including
-  the *Add Python to PATH* checkbox that everybody misses;
-- **git**, which the apps use to update themselves later;
-- **drive-xray and media-catalog**, side by side in `%USERPROFILE%\tools`;
-- their virtual environments and dependencies;
-- the optional **fast Rust engine** (`dx.exe`);
-- **Desktop and Start Menu buttons** for both apps.
-
-Re-run the same line any time to update — existing checkouts are pulled, not
-re-cloned, and local edits are never discarded.
-
-Then just double-click **drive-xray** on your Desktop. Index a drive there
-first: media-catalog reads what drive-xray produces, so it has nothing to show
-until a drive has been scanned.
-
-<details>
-<summary>Manual install, or already have Python and git</summary>
-
-Requirements: [Python 3.10+](https://www.python.org/downloads/) — during install, tick **"Add Python to PATH"**.
-
-```bat
-git clone https://github.com/rbleite/drive-xray.git
-cd drive-xray
-start.bat
-```
-
-`start.bat` creates a virtual environment, installs dependencies, and launches the UI — all in one step. Double-click it on subsequent runs.
-
-`install.bat` (double-click) does the full setup above from an existing
-checkout, and takes `-Path`, `-SkipRustEngine`, `-SkipShortcuts` and
-`-Startup`.
-
-</details>
-
-> **Tip:** to index a drive from the CLI on Windows, use the `dx` command in the same terminal:
-> ```bat
-> .venv\Scripts\python drive_xray.py index D:\ --label "External_D"
-> ```
-
-> **Faster engine (optional):** the pure-Python engine indexes everything on
-> Windows out of the box. For very large drives, download
-> `dx-<version>-windows-x86_64.zip` from the
-> [Releases](https://github.com/rbleite/drive-xray/releases) page, unzip
-> `dx.exe` into the project folder, and the UI switches to `engine: 🦀 Rust`
-> automatically — the `.db` files are byte-identical either way.
-
-#### Desktop shortcuts / start at login (Windows)
-
-`setup_shortcuts.bat` creates launch "buttons" so you never open a terminal —
-double-click it, or run from a terminal:
-
-```bat
-setup_shortcuts.bat            # Desktop + Start Menu shortcuts
-setup_shortcuts.bat -Startup   # also start automatically at login
-setup_shortcuts.bat -Remove    # undo everything it created
-```
-
-(The `.bat` wraps `setup_shortcuts.ps1` with `-ExecutionPolicy Bypass`, so it
-works on the default Windows script policy without changing system settings.)
-
-If [media-catalog](https://github.com/rbleite/media-catalog) is cloned next
-to this project (same parent folder), it gets its own shortcuts too — its
-`run.bat` serves on port 8503, so both apps can run at the same time. Use
-`-MediaCatalog "C:\path\to\media-catalog"` when it lives elsewhere.
-
-(On macOS the equivalent is `./build_app.sh`, which builds a double-click
-`~/Applications/drive-xray.app` — add it to **System Settings → Login Items**
-to start it at login. media-catalog ships its own `build_app.sh` as well.)
-
-### Multi-machine sync (OneDrive / Google Drive / Dropbox)
-
-Store all `.db` index files in a shared cloud folder so every machine
-sees every drive — even offline.
-
-1. Open the UI → sidebar → **⚙️ Configurações / Settings**
-2. Set the folder to your local OneDrive/GDrive path (e.g. `C:\Users\you\OneDrive`)
-3. Click **Import .db files from this folder** to pick up indexes synced from other machines
-4. New indexes created on this machine go there automatically
-
-Mount points are resolved automatically across machines and operating
-systems: a drive indexed on macOS at `/Volumes/MyDisk` is recognized when
-plugged into Windows (`E:\`) or Linux (`/media/<user>/MyDisk`) — the app
-matches the drive's actual content (its top-level entries) against the
-mounted volumes, so verify, refresh, dedupe and delete keep working
-wherever the disk shows up.
-
-### Optional Rust engine (~10× faster on large drives)
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-cd rust
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
-cargo build --release --target aarch64-apple-darwin
-cargo build --release --target x86_64-apple-darwin
-lipo -create -output target/universal/dx \
-    target/aarch64-apple-darwin/release/dx \
-    target/x86_64-apple-darwin/release/dx
-```
-
-The Streamlit UI auto-detects the Rust binary — the sidebar shows
-`engine: 🦀 Rust` instead of `🐍 Python`. The `.db` files are
-byte-identical, so you can switch engines at will.
-
-### Or via Homebrew (if available)
-
-```bash
-brew tap rbleite/tap
-brew install drive-xray
-```
-
-This installs the universal `dx` binary plus a `drive-xray-ui`
-launcher shortcut.
+> Prefer to do it by hand, use Homebrew, or build the Rust engine yourself?
+> See **[docs/install.md](docs/install.md)**.
 
 ---
 
-## How it works (in brief)
+## First steps
 
-1. **Hybrid indexing** — partial hash (head + middle + tail × 64 KB,
-   BLAKE2b 128) is constant-time per file. Full hash (BLAKE2b 256) is
-   computed **only** on duplicate candidates. On 30 TB this saves
-   hours vs. "hash everything".
-2. **Snapshots** — each `dx snapshot take` creates an immutable
-   record. `dx diff #2 #5` shows growth and shrink per folder between
-   two points in time.
-3. **Schema v5 with path interning** — every directory name lives once
-   in the `paths` table. On a 1.4 M-file drive this cuts the `.db`
-   from ~1 GB down to ~650 MB.
-4. **macOS-aware** — `-x` (firmlinks), `--skip-cloud`, 64-bit inode
-   handling on exFAT/NTFS without overflow.
+Once the app is open:
 
-Full documentation: [`DOCS.md`](DOCS.md).
-Rust engine architecture: [`rust/DESIGN.md`](rust/DESIGN.md).
+1. **Index a drive.** Sidebar → pick a folder or a mounted volume, give it a
+   label (`External_8TB`), and start. This is the "x-ray": from here on the
+   drive can be unplugged and still answer questions.
+2. **Look at the TreeMap** to see where the space actually went.
+3. **Find duplicates** — the wasted-space number already accounts for
+   hardlinks, so it is the real figure, not an inflated one.
+4. **Index a second drive**, then **compare the two**. This is where the tool
+   earns its keep: what exists only on one side, and what is safely redundant.
+5. **Take a snapshot** now and another next month, then diff them to see what
+   grew.
 
----
-
-## Benchmark
-
-Tested on Apple Silicon (M2 Pro), Apple SSD:
-
-| Workload | Python | Rust + mimalloc | Speedup |
-|---|---:|---:|---:|
-| 5,284 files / 750 MB | 1.45 s | 0.13 s | **11.5 ×** |
-| 2,000 files / 10 MB (50 dup groups) | 180 ms | 30 ms | **6 ×** |
-
-Real-world: 1.4 M files / 5.2 TB external drive → `.db` 648 MB,
-indexing in ~14 min on Rust.
+Nothing is ever deleted for you. Cleanup produces a script for you to read
+first.
 
 ---
 
-## Roadmap
+## Documentation
 
-| Status | Component |
+| Page | What's in it |
 |---|---|
-| ✅ | Hybrid v2 hashing (head + middle + tail) |
-| ✅ | Folder Merkle hash |
-| ✅ | macOS firmlinks / cloud sync filters |
-| ✅ | Schema v5 with path interning (Tier 3) |
-| ✅ | Incremental refresh (reuses unchanged hashes) |
-| ✅ | Historical snapshots + diff + prune |
-| ✅ | TreeMap (Plotly) |
-| ✅ | Assisted cleanup (`.sh` script + quarantine) |
-| ✅ | Bilingual UI (PT/EN) |
-| ✅ | Rust engine (~10× faster) |
-| ✅ | macOS `.app` launcher |
-| ✅ | Homebrew tap |
-| 🔜 | Snapshots V2 — content-addressed (smaller history) |
-| 🔜 | APFS clone detection (`clonefile`) |
-| 🔜 | In-UI cleanup execution with quarantine |
-| 🔜 | Search query language (`*.bam >100 GB modified<2024`) |
+| [docs/install.md](docs/install.md) | Manual installs, Homebrew, desktop shortcuts, start-at-login, building the Rust engine |
+| [docs/how-it-works.md](docs/how-it-works.md) | Hybrid hashing, snapshots, the schema, and benchmarks |
+| [docs/sync.md](docs/sync.md) | Using one catalogue across several machines (OneDrive / Drive / Dropbox) |
+| [docs/reference.md](docs/reference.md) | Full CLI reference (PT) — every command, flag and example |
+| [rust/DESIGN.md](rust/DESIGN.md) | Rust engine architecture |
+| [docs/roadmap.md](docs/roadmap.md) | What's done and what's next |
+
+**Companion app:** [media-catalog](https://github.com/rbleite/media-catalog)
+turns a drive-xray index into a browsable gallery of your films, series,
+albums and games. The Windows installer above sets up both.
 
 ---
 
@@ -328,7 +186,7 @@ A UI Streamlit é bilingue: clica no botão **🇵🇹 PT** no topo da
 sidebar para mudar todos os textos para português. Os comandos CLI
 e mensagens técnicas mantêm-se em inglês.
 
-**Documentação técnica completa em [`DOCS.md`](DOCS.md).**
+**Documentação técnica completa em [`docs/reference.md`](docs/reference.md).**
 
 ---
 
