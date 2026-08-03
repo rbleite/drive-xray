@@ -29,6 +29,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -3844,6 +3845,277 @@ def _force_utf8_output() -> None:
             pass   # not a reconfigurable TextIO (redirected/captured) — fine
 
 
+
+# ── search ──────────────────────────────────────────────────────────────────
+# Answering "where is that thing?" from the x-rays alone: the drive can be in a
+# drawer and the index still knows the path, the size and the date. Everything
+# here reads only what indexing already recorded -- no file is opened.
+
+class QueryError(ValueError):
+    """A query the user can fix, phrased so the message says how."""
+
+
+_SIZE_UNITS = {"": 1, "B": 1, "K": 1024, "KB": 1024, "M": 1024**2,
+               "MB": 1024**2, "G": 1024**3, "GB": 1024**3, "T": 1024**4,
+               "TB": 1024**4, "P": 1024**5, "PB": 1024**5}
+_SIZE_RE = re.compile(r"^(\d+(?:[.,]\d+)?)\s*([KMGTP]?B?)$", re.I)
+_DATE_RE = re.compile(r"^(\d{4})(?:-(\d{2}))?(?:-(\d{2}))?$")
+# a bare >20GB / <100MB, and the field:op:value forms
+_BARE_CMP_RE = re.compile(r"^(>=|<=|>|<)(.+)$")
+_FIELD_CMP_RE = re.compile(r"^(\w+)\s*(>=|<=|>|<|=|:)\s*(.*)$", re.S)
+
+
+def parse_size(text: str) -> int:
+    """'20GB' -> bytes. Binary units (1 GB = 1024 MB), matching how the rest of
+    the app reports sizes."""
+    m = _SIZE_RE.match(text.strip())
+    if not m:
+        raise QueryError(f"not a size: {text!r} (try 20GB, 500MB, 1.5TB)")
+    return int(float(m.group(1).replace(",", ".")) * _SIZE_UNITS[m.group(2).upper()])
+
+
+def parse_date_range(text: str) -> tuple[float, float]:
+    """'2024' -> (start, end) as unix timestamps, where end is the first
+    instant AFTER the period. Accepts 2024, 2024-06, 2024-06-15."""
+    m = _DATE_RE.match(text.strip())
+    if not m:
+        raise QueryError(f"not a date: {text!r} (try 2024, 2024-06, 2024-06-15)")
+    year, month, day = int(m.group(1)), m.group(2), m.group(3)
+    try:
+        if day:
+            start = datetime.datetime(year, int(month), int(day))
+            end = start + datetime.timedelta(days=1)
+        elif month:
+            start = datetime.datetime(year, int(month), 1)
+            end = (datetime.datetime(year + (int(month) == 12),
+                                     int(month) % 12 + 1, 1))
+        else:
+            start = datetime.datetime(year, 1, 1)
+            end = datetime.datetime(year + 1, 1, 1)
+    except ValueError as exc:
+        raise QueryError(f"not a real date: {text!r} ({exc})") from exc
+    return start.timestamp(), end.timestamp()
+
+
+def _split_terms(query: str) -> list[str]:
+    """Split on whitespace, keeping "quoted phrases" together."""
+    out, buf, quote = [], [], ""
+    for ch in query:
+        if quote:
+            if ch == quote:
+                quote = ""
+            else:
+                buf.append(ch)
+        elif ch in "\"'":
+            quote = ch
+        elif ch.isspace():
+            if buf:
+                out.append("".join(buf)); buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        out.append("".join(buf))
+    return out
+
+
+def parse_query(query: str) -> dict:
+    """Turn a search string into filters.
+
+        STP*                    name starts with STP  (glob)
+        relatorio               name contains 'relatorio'
+        *.mkv >20GB             glob + size
+        type:folder             only folders  (also type:file)
+        drive:8Tb               only that drive
+        path:Ricardo/Movies     path contains this text
+        modified<2024           changed before 2024 began
+        modified>=2024-06       changed on or after June 2024
+
+    Terms combine with AND. Comparisons on a period: `<2024` is before it
+    started, `>2024` is after it ended, `>=2024` from its start, `<=2024`
+    until its end.
+    """
+    f: dict = {"names": [], "paths": [], "drives": [], "is_dir": None,
+               "size_min": None, "size_max": None,
+               "mtime_min": None, "mtime_max": None}
+    if not query or not query.strip():
+        raise QueryError("empty query")
+
+    for term in _split_terms(query):
+        m = _BARE_CMP_RE.match(term)
+        if m:                                   # bare >20GB / <100MB
+            _apply_size(f, m.group(1), m.group(2))
+            continue
+        m = _FIELD_CMP_RE.match(term)
+        if m:
+            field, op, value = m.group(1).lower(), m.group(2), m.group(3)
+            if field in ("size", "bytes"):
+                _apply_size(f, ":" if op == ":" else op, value)
+            elif field in ("modified", "mtime", "date", "changed"):
+                _apply_date(f, op, value)
+            elif field == "type":
+                v = value.lower()
+                if v in ("folder", "dir", "directory", "pasta"):
+                    f["is_dir"] = 1
+                elif v in ("file", "ficheiro"):
+                    f["is_dir"] = 0
+                else:
+                    raise QueryError(f"type must be file or folder, not {value!r}")
+            elif field == "drive":
+                f["drives"].append(value.lower())
+            elif field == "path":
+                f["paths"].append(value.lower())
+            elif field == "name":
+                f["names"].append(value.lower())
+            else:
+                raise QueryError(
+                    f"unknown field {field!r} — try name, path, type, drive,"
+                    f" size or modified")
+            continue
+        f["names"].append(term.lower())         # bare word: match the name
+
+    if not any((f["names"], f["paths"], f["drives"], f["is_dir"] is not None,
+                f["size_min"], f["size_max"], f["mtime_min"], f["mtime_max"])):
+        raise QueryError("nothing to search for")
+    return f
+
+
+def _apply_size(f: dict, op: str, value: str) -> None:
+    n = parse_size(value)
+    if op == ">":
+        f["size_min"] = max(n + 1, f["size_min"] or 0)
+    elif op == ">=":
+        f["size_min"] = max(n, f["size_min"] or 0)
+    elif op == "<":
+        f["size_max"] = n - 1 if f["size_max"] is None else min(f["size_max"], n - 1)
+    elif op == "<=":
+        f["size_max"] = n if f["size_max"] is None else min(f["size_max"], n)
+    else:                                        # size:20GB — exactly that
+        f["size_min"] = f["size_max"] = n
+
+
+def _apply_date(f: dict, op: str, value: str) -> None:
+    start, end = parse_date_range(value)
+    if op == "<":                                # before the period began
+        f["mtime_max"] = start if f["mtime_max"] is None else min(f["mtime_max"], start)
+    elif op == "<=":                             # until the period ended
+        f["mtime_max"] = end if f["mtime_max"] is None else min(f["mtime_max"], end)
+    elif op == ">":                              # after the period ended
+        f["mtime_min"] = max(end, f["mtime_min"] or 0)
+    elif op == ">=":                             # from the period's start
+        f["mtime_min"] = max(start, f["mtime_min"] or 0)
+    else:                                        # modified:2024 — during it
+        f["mtime_min"] = max(start, f["mtime_min"] or 0)
+        f["mtime_max"] = end if f["mtime_max"] is None else min(f["mtime_max"], end)
+
+
+def _name_matches(segment: str, patterns: list[str]) -> bool:
+    """A pattern with * or ? is a glob; anything else is a substring. Both are
+    case-insensitive, which matters for accented names."""
+    low = (segment or "").lower()
+    for pat in patterns:
+        if "*" in pat or "?" in pat or "[" in pat:
+            if not fnmatch.fnmatch(low, pat):
+                return False
+        elif pat not in low:
+            return False
+    return True
+
+
+def _sql_prefilter(f: dict) -> tuple[str, list]:
+    """The part of the query SQLite can do cheaply. Name globs are refined in
+    Python afterwards -- LIKE cannot express them, and its case rules do not
+    cover accented characters."""
+    where, params = ["c.snapshot_id = ?"], []
+    if f["is_dir"] is not None:
+        where.append("c.is_dir = ?"); params.append(f["is_dir"])
+    if f["size_min"] is not None:
+        where.append("c.size >= ?"); params.append(f["size_min"])
+    if f["size_max"] is not None:
+        where.append("c.size <= ?"); params.append(f["size_max"])
+    if f["mtime_min"] is not None:
+        where.append("c.mtime >= ?"); params.append(f["mtime_min"])
+    if f["mtime_max"] is not None:
+        where.append("c.mtime <= ?"); params.append(f["mtime_max"])
+    for sub in f["paths"]:
+        where.append("LOWER(p.full_path) LIKE ?"); params.append(f"%{sub}%")
+    # A leading literal in a glob is a free prefix filter for SQLite.
+    for pat in f["names"]:
+        head = re.split(r"[*?\[]", pat, 1)[0]
+        if head:
+            where.append("LOWER(p.segment) LIKE ?")
+            params.append(f"{head}%" if pat.startswith(head) and
+                          ("*" in pat or "?" in pat or "[" in pat) else f"%{head}%")
+    return " AND ".join(where), params
+
+
+def search_drives(db_labels, query: str, limit: int = 500,
+                  check_mounted: bool = True) -> dict:
+    """Run a query across indexed drives.
+
+    db_labels: [(db_path, label)] -- the same shape cross_dedupe takes.
+    Returns {"query", "filters", "hits", "total", "truncated", "drives",
+    "errors"}, where each hit carries the drive, the path inside it, size,
+    mtime, and -- when the volume is plugged in right now -- the absolute
+    path you can actually open.
+    """
+    f = parse_query(query)
+    wanted = set(f["drives"])
+    hits: list[dict] = []
+    total = 0
+    drives_read: list[str] = []
+    errors: list[str] = []
+
+    for db_path, label in db_labels:
+        if wanted and label.lower() not in wanted:
+            continue
+        try:
+            conn = open_db(Path(db_path))
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+            continue
+        try:
+            sid = latest_snapshot_id(conn)
+            if sid is None:
+                continue
+            drives_read.append(label)
+            where, params = _sql_prefilter(f)
+            rows = conn.execute(
+                "SELECT p.full_path, p.segment, c.is_dir, c.size, c.mtime"
+                " FROM entries_core c JOIN paths p ON p.id = c.path_id"
+                f" WHERE {where}", [sid, *params])
+
+            mount = None
+            if check_mounted:
+                try:
+                    row = conn.execute(
+                        "SELECT root_path FROM drive LIMIT 1").fetchone()
+                    if row:
+                        cand = resolve_root(conn, row[0])
+                        mount = str(cand) if Path(cand).is_dir() else None
+                except Exception:
+                    mount = None
+
+            for full_path, segment, is_dir, size, mtime in rows:
+                if f["names"] and not _name_matches(segment, f["names"]):
+                    continue
+                total += 1
+                if len(hits) >= limit:
+                    continue
+                hit = {"drive": label, "path": full_path, "is_dir": bool(is_dir),
+                       "size": size or 0, "mtime": mtime,
+                       "mounted": mount is not None}
+                if mount:
+                    hit["abs_path"] = str(Path(mount) / str(full_path or ""))
+                hits.append(hit)
+        finally:
+            conn.close()
+
+    hits.sort(key=lambda h: (-(h["size"] or 0), h["drive"], h["path"]))
+    return {"query": query, "filters": f, "hits": hits, "total": total,
+            "truncated": total > len(hits), "drives": drives_read,
+            "errors": errors}
+
+
 def main():
     _force_utf8_output()
     p = argparse.ArgumentParser(prog="drive-xray")
@@ -3947,6 +4219,16 @@ def main():
                     help="I/O threads for full hashing (default: min(4, cpu_count))")
 
     sub.add_parser("drives", help="list all drives registered in the central index")
+
+    pfind = sub.add_parser(
+        "find", help="search every x-ray by name, size and date")
+    pfind.add_argument("query", nargs="+",
+                       help='e.g. "STP* type:folder"  |  "*.mkv >20GB"  '
+                            '|  "*.bam modified<2024 drive:8Tb"')
+    pfind.add_argument("--db", type=Path, action="append", dest="dbs",
+                       help="search these .db files (default: every registered drive)")
+    pfind.add_argument("--limit", type=int, default=200,
+                       help="max rows to print (default 200)")
 
     pif = sub.add_parser(
         "import-folder",
@@ -4176,6 +4458,46 @@ def main():
                     f"  {e['label']:<20}  {e['last_indexed']:<20}"
                     f"  {e['root']:<40}  {e['db']}{status}"
                 )
+    elif args.cmd == "find":
+        if args.dbs:
+            db_labels = []
+            for db in args.dbs:
+                try:
+                    conn = open_db(db)
+                    row = conn.execute("SELECT label FROM drive LIMIT 1").fetchone()
+                    conn.close()
+                    db_labels.append((db, row[0] if row else db.stem))
+                except Exception as exc:
+                    print(f"  skip {db}: {exc}", file=sys.stderr)
+        else:
+            db_labels = [(e["db"], e["label"]) for e in registry_list() if e["exists"]]
+        if not db_labels:
+            sys.exit("no drives to search — run `dx index` first, or pass --db")
+        try:
+            res = search_drives(db_labels, " ".join(args.query), limit=args.limit)
+        except QueryError as exc:
+            sys.exit(f"bad query: {exc}")
+        for err in res["errors"]:
+            print(f"  skip {err}", file=sys.stderr)
+        if not res["hits"]:
+            print(f"  nothing matches {res['query']!r} on "
+                  f"{len(res['drives'])} drive(s)")
+        else:
+            print(f"  {'DRIVE':<14}  {'SIZE':>10}  {'MODIFIED':<16}  PATH")
+            print(f"  {'-'*14}  {'-'*10}  {'-'*16}  {'-'*40}")
+            for h in res["hits"]:
+                when = (datetime.datetime.fromtimestamp(h["mtime"])
+                        .strftime("%Y-%m-%d %H:%M") if h["mtime"] else "")
+                size = "<dir>" if h["is_dir"] else human(h["size"])
+                mark = "" if h["mounted"] else "  [drive offline]"
+                print(f"  {h['drive']:<14}  {size:>10}  {when:<16}  "
+                      f"{h['path']}{mark}")
+            shown, total = len(res["hits"]), res["total"]
+            if res["truncated"]:
+                print(f"\n  showing {shown} of {total} matches "
+                      f"— narrow the query or raise --limit")
+            else:
+                print(f"\n  {total} match(es) across {len(res['drives'])} drive(s)")
     elif args.cmd == "cross-dedupe":
         if args.use_all or not args.dbs:
             reg = registry_list()

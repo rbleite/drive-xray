@@ -50,6 +50,7 @@ from drive_xray import (
     tags_get, tags_set, tags_search, notes_get, notes_get_all, notes_set,
     compute_auto_tags, AUTO_TAGS_YAML_PATH, write_default_auto_tag_rules,
     get_auto_tag_rules,
+    search_drives, QueryError,
 )
 
 
@@ -1394,10 +1395,63 @@ st.caption(f"`{info['root']}`  ·  {t('indexed_on')} {info['indexed_at']}")
 if _selected_busy:
     _render_op_status(selected_db, running=True)
 
-tab_summary, tab_dupes, tab_map, tab_history, tab_compare = st.tabs(
+(tab_summary, tab_dupes, tab_map, tab_history, tab_compare,
+ tab_find) = st.tabs(
     [t("tab_summary"), t("tab_dupes"), t("tab_map"),
-     t("tab_history"), t("tab_compare")]
+     t("tab_history"), t("tab_compare"), t("tab_find")]
 )
+
+# --- Find: the only tab that is not about the selected drive ---------------
+# Everything else answers "what is on THIS drive". This one answers "where is
+# that thing", which is only useful across every x-ray at once -- including
+# the drives sitting in a drawer.
+with tab_find:
+    st.subheader(t("find_title"))
+    st.caption(t("find_intro"))
+
+    _find_reg = [(e["db"], e["label"]) for e in registry_list() if e["exists"]]
+    if not _find_reg:
+        st.info(t("find_no_drives"))
+    else:
+        _fc1, _fc2 = st.columns([5, 1])
+        _q = _fc1.text_input(t("find_label"), key="find_q",
+                             placeholder=t("find_placeholder"),
+                             label_visibility="collapsed")
+        _go = _fc2.button(t("find_button"), use_container_width=True)
+        with st.expander("?", expanded=False):
+            st.markdown(t("find_help"))
+
+        if _q and (_go or st.session_state.get("find_last") == _q):
+            st.session_state["find_last"] = _q
+            try:
+                _res = search_drives(_find_reg, _q, limit=500)
+            except QueryError as _exc:
+                st.error(t("find_bad_query", err=str(_exc)))
+                _res = None
+            if _res is not None:
+                for _err in _res["errors"]:
+                    st.warning(t("find_skipped", err=_err))
+                if not _res["hits"]:
+                    st.info(t("find_nothing", q=_q, n=len(_res["drives"])))
+                else:
+                    import datetime as _dtf
+                    _rows = [{
+                        t("find_col_drive"): _h["drive"],
+                        t("find_col_size"): "—" if _h["is_dir"] else human(_h["size"]),
+                        t("find_col_modified"): (
+                            _dtf.datetime.fromtimestamp(_h["mtime"])
+                            .strftime("%Y-%m-%d %H:%M") if _h["mtime"] else ""),
+                        t("find_col_path"): _h["path"],
+                        t("find_col_status"): (t("find_mounted") if _h["mounted"]
+                                               else t("find_offline")),
+                    } for _h in _res["hits"]]
+                    st.dataframe(_rows, use_container_width=True, hide_index=True)
+                    if _res["truncated"]:
+                        st.caption(t("find_truncated", shown=len(_res["hits"]),
+                                     total=_res["total"]))
+                    else:
+                        st.caption(t("find_count", n=_res["total"],
+                                     d=len(_res["drives"])))
 
 # --- Summary ---
 with tab_summary:

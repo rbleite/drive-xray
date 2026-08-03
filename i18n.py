@@ -63,6 +63,32 @@ TRANSLATIONS = {
         "tab_summary": "📊 Resumo",
         "tab_dupes": "🔁 Duplicados",
         "tab_compare": "⚖️ Comparar",
+        "tab_find": "🔎 Procurar",
+        "find_title": "Procurar em todas as drives",
+        "find_intro": "Procura por nome, tamanho e data em **todos** os raios-x — mesmo nas drives que estão desligadas. O resultado diz-te em que drive está e o caminho lá dentro.",
+        "find_label": "Pesquisa",
+        "find_placeholder": "STP* type:folder",
+        "find_button": "🔎 Procurar",
+        "find_help": """Termos combinam-se com E (todos têm de ser verdade).
+
+**Nome** — `STP*` começa por STP · `*.mkv` termina em .mkv · `relatorio` contém a palavra
+**Tipo** — `type:folder` · `type:file`
+**Tamanho** — `>20GB` · `<100MB` · `size:1.5TB`
+**Data** — `modified<2024` antes de 2024 · `modified>2024` depois de 2024 · `modified:2024` durante 2024
+**Onde** — `drive:8Tb` · `path:"HD Movies"`""",
+        "find_no_drives": "Ainda não há drives indexadas para procurar.",
+        "find_nothing": "Nada corresponde a `{q}` nas {n} drive(s) pesquisadas.",
+        "find_count": "{n} resultado(s) em {d} drive(s).",
+        "find_truncated": "A mostrar {shown} de {total}. Refina a pesquisa para veres o resto.",
+        "find_col_drive": "Drive",
+        "find_col_size": "Tamanho",
+        "find_col_modified": "Modificado",
+        "find_col_path": "Caminho",
+        "find_col_status": "Estado",
+        "find_mounted": "ligada",
+        "find_offline": "desligada",
+        "find_bad_query": "Pesquisa inválida: {err}",
+        "find_skipped": "Ignorada {err}",
         "files": "Ficheiros",
         "folders": "Pastas",
         "total_size": "Tamanho total",
@@ -426,6 +452,32 @@ TRANSLATIONS = {
         "tab_summary": "📊 Summary",
         "tab_dupes": "🔁 Duplicates",
         "tab_compare": "⚖️ Compare",
+        "tab_find": "🔎 Find",
+        "find_title": "Search every drive",
+        "find_intro": "Search by name, size and date across **all** x-rays — including drives that are unplugged. Results tell you which drive a thing is on, and where inside it.",
+        "find_label": "Query",
+        "find_placeholder": "STP* type:folder",
+        "find_button": "🔎 Search",
+        "find_help": """Terms combine with AND (all must hold).
+
+**Name** — `STP*` starts with STP · `*.mkv` ends in .mkv · `report` contains the word
+**Type** — `type:folder` · `type:file`
+**Size** — `>20GB` · `<100MB` · `size:1.5TB`
+**Date** — `modified<2024` before 2024 · `modified>2024` after 2024 · `modified:2024` during 2024
+**Where** — `drive:8Tb` · `path:"HD Movies"`""",
+        "find_no_drives": "No drives indexed yet to search.",
+        "find_nothing": "Nothing matches `{q}` across the {n} drive(s) searched.",
+        "find_count": "{n} match(es) across {d} drive(s).",
+        "find_truncated": "Showing {shown} of {total}. Narrow the query to see the rest.",
+        "find_col_drive": "Drive",
+        "find_col_size": "Size",
+        "find_col_modified": "Modified",
+        "find_col_path": "Path",
+        "find_col_status": "Status",
+        "find_mounted": "plugged in",
+        "find_offline": "unplugged",
+        "find_bad_query": "Bad query: {err}",
+        "find_skipped": "Skipped {err}",
         "files": "Files",
         "folders": "Folders",
         "total_size": "Total size",

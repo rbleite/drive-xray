@@ -17,5 +17,5 @@
 | 🔜 | Snapshots V2 — content-addressed (smaller history) |
 | 🔜 | APFS clone detection (`clonefile`) |
 | 🔜 | In-UI cleanup execution with quarantine |
-| 🔜 | Search query language (`*.bam >100 GB modified<2024`) |
+| ✅ | Search query language (`*.bam >100 GB modified<2024`) |
 
