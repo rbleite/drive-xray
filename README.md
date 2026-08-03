@@ -122,6 +122,9 @@ Once the app is open:
    earns its keep: what exists only on one side, and what is safely redundant.
 5. **Take a snapshot** now and another next month, then diff them to see what
    grew.
+6. **Search across every drive** — `dx find "*.mkv" ">20GB"`, or the Find tab.
+   This works with the drives unplugged, which is the point of having indexed
+   them. See [docs/search.md](docs/search.md).
 
 Nothing is ever deleted for you. Cleanup produces a script for you to read
 first.
@@ -133,6 +136,7 @@ first.
 | Page | What's in it |
 |---|---|
 | [docs/install.md](docs/install.md) | Manual installs, Homebrew, desktop shortcuts, start-at-login, building the Rust engine |
+| [docs/search.md](docs/search.md) | Finding things by name, size and date across every drive |
 | [docs/how-it-works.md](docs/how-it-works.md) | Hybrid hashing, snapshots, the schema, and benchmarks |
 | [docs/sync.md](docs/sync.md) | Using one catalogue across several machines (OneDrive / Drive / Dropbox) |
 | [docs/reference.md](docs/reference.md) | Full CLI reference (PT) — every command, flag and example |
