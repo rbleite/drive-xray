@@ -1905,6 +1905,17 @@ with tab_dupes:
                              size=human(_cplan.get("unconfirmed_bytes", 0))))
             else:
                 st.success(t("cleanup_ready", n=n_actions))
+            # APFS clones look like ordinary duplicates in every listing, so
+            # without this the figure on the button is simply higher than
+            # anything deleting them can return
+            if _cplan.get("n_clone_actions"):
+                st.info(t("cleanup_clones",
+                          n=_cplan["n_clone_actions"],
+                          real=human(_cplan.get("total_freeable", 0)),
+                          logical=human(_cplan.get("total_logical", 0))))
+            if _cplan.get("n_clone_unknown"):
+                st.caption(t("cleanup_clone_unknown",
+                             n=_cplan["n_clone_unknown"]))
             # dialect follows the platform: a .sh of E:\... paths would be as
             # unrunnable on the PC as a .ps1 of /Volumes/... ones on the Mac
             _flavor = st.session_state.get("cleanup_flavor") or default_script_flavor()
