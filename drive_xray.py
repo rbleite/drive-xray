@@ -2245,6 +2245,38 @@ def dx_supports_schema(binary_version: str) -> bool:
     return _version_tuple(binary_version) >= _version_tuple(MIN_DX_VERSION)
 
 
+def engine_status(is_rust: bool, bin_version: str,
+                  incompatible: list[tuple[str, str]],
+                  ) -> tuple[str, str, dict] | None:
+    """What, if anything, to tell the user about the engine in use.
+
+    Returns (severity, translation key, format arguments), or None when there
+    is nothing worth saying.
+
+    `incompatible` holds the (path, version) candidates the probe refused for
+    predating the schema. Finding one is NOT the same as falling back: the
+    probe walks half a dozen locations, so an old dx left behind in one of
+    them is routinely skipped while a good one is found further down the list.
+    Announcing "the app is using the Python engine" in that case is simply
+    false -- and a warning that fires when nothing is wrong is how people
+    learn to scroll past the one that matters.
+    """
+    if incompatible and not is_rust:
+        _path, ver = incompatible[0]
+        return ("warning", "engine_too_old",
+                {"have": ver, "want": MIN_DX_VERSION, "schema": SCHEMA_VERSION})
+    if incompatible:
+        # a good engine IS in use; the stale copy is only worth mentioning so
+        # it can be deleted before it is ever found first
+        path, ver = incompatible[0]
+        return ("caption", "engine_stale_skipped", {"have": ver, "path": path})
+    if is_rust and bin_version and \
+            _version_tuple(bin_version) < _version_tuple(DX_VERSION):
+        return ("info", "engine_behind",
+                {"have": bin_version, "want": DX_VERSION})
+    return None
+
+
 def human(n: int) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024:
