@@ -47,8 +47,18 @@ READ_CHUNK = 1024 * 1024
 # v1 = head + tail; v2 = head + middle + tail (defends against bio formats like
 # BAM/VCF where header/footer are stable but body varies).
 HASH_VERSION = 2
-DX_VERSION = "1.4.1"
-SCHEMA_VERSION = 6  # see _migrate_to_v6 / SCHEMA constant below
+DX_VERSION = "1.5.0"
+
+# First dx release whose Rust engine understands SCHEMA_VERSION. The two move
+# independently -- Python migrates a .db the moment the app runs, while the
+# Rust binary is downloaded separately and can sit unchanged for months. v7
+# landed ten days AFTER the 1.4.1 release, so every published binary before
+# 1.5.0 reads a schema it was never built for.
+MIN_DX_VERSION = "1.5.0"
+SCHEMA_VERSION = 7  # see _migrate_to_v7 / SCHEMA constant below.
+# Was left at 6 when v7 landed; `dx --version` reported a schema it no
+# longer wrote, which is the same class of staleness that let an
+# incompatible Rust binary pass unnoticed.
 SKIP_DIR_NAMES = {
     ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems",
     ".DocumentRevisions-V100", ".PKInstallSandboxManager",
@@ -2204,6 +2214,35 @@ def reload_if_stale(module):
         module = importlib.reload(module)
         module._loaded_mtime = mtime
     return module
+
+
+
+def _version_tuple(v: str) -> tuple:
+    """'1.4.1' -> (1, 4, 1). Unparsable text sorts lowest, so anything we
+    cannot read is treated as too old rather than assumed fine."""
+    parts = []
+    for chunk in str(v or "").strip().lstrip("v").split("."):
+        digits = ""
+        for ch in chunk:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break                      # stop at 1.5.0-rc1 style suffixes
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts) if parts else (0,)
+
+
+def dx_supports_schema(binary_version: str) -> bool:
+    """Whether a dx binary of this version can be trusted with the current
+    schema.
+
+    This exists because the previous check compared the binary's version to
+    DX_VERSION for EQUALITY, and neither was bumped when the schema changed --
+    so a binary predating v7 matched exactly, raised no warning, and quietly
+    produced wrong answers on migrated databases. A version label nobody
+    increments is not a compatibility check.
+    """
+    return _version_tuple(binary_version) >= _version_tuple(MIN_DX_VERSION)
 
 
 def human(n: int) -> str:
