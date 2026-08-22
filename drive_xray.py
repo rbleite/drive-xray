@@ -3693,6 +3693,82 @@ def verify_integrity(db_path: Path, full: bool = False, progress=None) -> dict:
     return res
 
 
+
+def dedupe_readiness(db_labels: list[tuple[Path, str]],
+                     min_size: int = 1024 * 1024) -> dict:
+    """Explain why a cross-drive search would find nothing.
+
+    cross_dedupe() drops a drive silently when its .db will not open or has no
+    snapshot, and it compares partial hashes without checking they were made by
+    the same algorithm. Each of those produces an empty result that looks
+    identical to "you have no duplicates" -- so this reports what was actually
+    readable, and what would stop a match even when everything reads fine.
+
+    Nothing here is expensive: one COUNT per drive, no hashing, no file reads.
+    """
+    per_drive, versions = [], set()
+    for db_path, label in db_labels:
+        info = {"label": label, "db": str(db_path), "readable": False,
+                "has_snapshot": False, "hash_version": None,
+                "files": 0, "eligible": 0, "error": None}
+        try:
+            conn = open_db(Path(db_path))
+        except Exception as exc:
+            info["error"] = str(exc)[:200]
+            per_drive.append(info)
+            continue
+        try:
+            info["readable"] = True
+            sid = latest_snapshot_id(conn)
+            if sid is None:
+                per_drive.append(info)
+                continue
+            info["has_snapshot"] = True
+            try:
+                info["hash_version"] = get_hash_version(conn)
+                versions.add(info["hash_version"])
+            except Exception:
+                pass
+            info["files"] = conn.execute(
+                "SELECT COUNT(*) FROM entries_core"
+                " WHERE snapshot_id=? AND is_dir=0", (sid,)).fetchone()[0]
+            # exactly the rows cross_dedupe will consider
+            info["eligible"] = conn.execute(
+                "SELECT COUNT(*) FROM entries_core WHERE snapshot_id=?"
+                " AND is_dir=0 AND size>=? AND partial_hash IS NOT NULL",
+                (sid, min_size)).fetchone()[0]
+        finally:
+            conn.close()
+        per_drive.append(info)
+
+    usable = [d for d in per_drive if d["eligible"] > 0]
+    reasons = []
+    for d in per_drive:
+        if d["error"]:
+            reasons.append(f"{d['label']}: the .db could not be opened "
+                           f"({d['error']})")
+        elif not d["has_snapshot"]:
+            reasons.append(f"{d['label']}: the index has no snapshot — "
+                           f"it was never completed")
+        elif d["eligible"] == 0:
+            reasons.append(
+                f"{d['label']}: no file at or above the size threshold carries "
+                f"a hash ({d['files']:,} files indexed)")
+    if len(usable) < 2:
+        reasons.append(
+            f"only {len(usable)} drive(s) contributed anything — a cross-drive "
+            f"comparison needs at least 2")
+    if len(versions) > 1:
+        # THE silent one: hashes made by different algorithms never match, so
+        # the search completes normally and finds nothing.
+        reasons.append(
+            f"partial-hash versions differ across drives ({', '.join('v' + str(v) for v in sorted(versions))})"
+            f" — hashes from different versions can never match. Re-index so"
+            f" they agree.")
+    return {"drives": per_drive, "usable": len(usable),
+            "hash_versions": sorted(versions), "reasons": reasons,
+            "can_compare": len(usable) >= 2 and len(versions) <= 1}
+
 def read_drive_index_opts(db_labels: list[tuple[Path, str]]) -> dict[str, dict]:
     """Return {label: {"one_fs": bool, "skip_cloud": bool}} from each db's
     drive table. Drives that can't be read are omitted."""
@@ -4586,6 +4662,16 @@ def main():
         groups = cross_dedupe(db_labels, min_size=args.min_size)
         if not groups:
             print("  no cross-drive duplicates found.")
+            # An empty result looks the same whether you have no duplicates or
+            # the search never compared anything. Say which.
+            _ready = dedupe_readiness(db_labels, min_size=args.min_size)
+            if _ready["reasons"]:
+                print("\n  ...though the search could not compare everything:")
+                for _why in _ready["reasons"]:
+                    print(f"    - {_why}")
+            else:
+                print(f"  ({_ready['usable']} drives compared, "
+                      f"nothing in common above {human(args.min_size)})")
         else:
             total_wasted = sum(g["wasted_bytes"] for g in groups)
             print(f"  {len(groups)} groups · {human(total_wasted)} wasted\n")
