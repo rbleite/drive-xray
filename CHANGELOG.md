@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-08-22
+
+Released because v1.5.0 shipped with a version banner that misreported the
+schema, and a released binary that lies about the schema is the exact failure
+this release series exists to prevent. Moving the v1.5.0 tag was the other
+option and was rejected: a version label has to identify one build.
+
+### Fixed
+- **The Rust `dx --version` banner said `schema: v6`** for a month after
+  schema v7 shipped. The number is a constant that no migration touches, so it
+  drifted silently — the same shape of bug as the compatibility guard below,
+  and now pinned by a test that reads every mention of it in `cli.rs`, not
+  just the first. The short and long forms of the banner had gone out of sync
+  with each other for exactly that reason.
+- **A stale `dx` found and skipped was reported as a fall back to Python.**
+  The probe walks half a dozen locations; an old binary left in an early one
+  is refused and a good one found further down, which is the healthy outcome.
+  The sidebar keyed its warning off "did we refuse anything at all", so it
+  announced a Python fallback directly beneath a caption saying the Rust
+  engine was in use. The decision moved into `engine_status()`, which warns
+  only when the refusal actually cost the fast engine and otherwise names the
+  stale copy — with its path — so it can be deleted.
+
 ### Added
 - **The cleanup script is now generated in the dialect of the machine it will
   run on**: PowerShell (`.ps1`) on Windows, bash (`.sh`) elsewhere. A plan's
