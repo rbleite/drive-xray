@@ -11,11 +11,14 @@ use std::path::PathBuf;
 /// a migration banner.
 const VERSION_SHORT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    " (schema v6 · hash v2)",
+    " (schema v7 · hash v2)",
 );
 const VERSION_LONG: &str = concat!(
     env!("CARGO_PKG_VERSION"), "\n",
-    "  schema:  v6 (path interning + metadata)\n",
+    // Kept in step with SCHEMA_VERSION in drive_xray.py; a test fails if
+    // they drift. This line claimed v6 for a month after v7 shipped --
+    // the same stale-constant habit that let an incompatible binary pass.
+    "  schema:  v7 (path interning, one row per path)\n",
     "  hash:    BLAKE2b v2 (head + middle + tail)\n",
     "  repo:    ", env!("CARGO_PKG_REPOSITORY"), "\n",
 );

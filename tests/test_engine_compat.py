@@ -24,7 +24,7 @@ import pytest
 import drive_xray as dx
 from drive_xray import (
     DX_VERSION, MIN_DX_VERSION, SCHEMA_VERSION, _version_tuple,
-    dx_supports_schema,
+    dx_supports_schema, engine_status,
 )
 
 
@@ -145,3 +145,116 @@ def test_an_old_binary_is_rejected_by_the_probe(monkeypatch, tmp_path):
     assert reported == "1.4.1"
     assert not dx_supports_schema(reported), \
         "this binary must never be handed index or dedupe work"
+
+
+# ── refusing a candidate is not the same as falling back ─────────────────────
+#
+# The probe walks several locations: an env override, three build dirs, the
+# app's own folder, /opt/homebrew/bin, /usr/local/bin, then PATH. An old dx
+# left in an early one is skipped and a good one found later -- which is
+# exactly what a screenshot showed: `engine: 🦀 Rust` in the caption and,
+# directly underneath, a warning insisting the app was using Python.
+
+_STALE = [("/opt/homebrew/bin/dx", "1.4.1")]
+
+
+def test_a_skipped_stale_binary_does_not_claim_we_fell_back():
+    """The false alarm. Rust IS in use; saying otherwise is untrue, and it
+    trains people to ignore the warning that means something."""
+    level, key, _kw = engine_status(True, DX_VERSION, _STALE)
+    assert key != "engine_too_old", \
+        "claimed a Python fallback while the Rust engine was in use"
+    assert level != "warning", "nothing is wrong — this must not be a warning"
+
+
+def test_the_skipped_copy_is_still_named_so_it_can_be_deleted():
+    """Silence would be wrong too: the old binary is still on disk and will be
+    found first the day the good one moves."""
+    _level, key, kw = engine_status(True, DX_VERSION, _STALE)
+    assert key == "engine_stale_skipped"
+    assert kw["path"] == "/opt/homebrew/bin/dx"
+    assert kw["have"] == "1.4.1"
+
+
+def test_an_actual_fallback_still_warns():
+    """The case the warning was written for, and it must survive the fix."""
+    level, key, kw = engine_status(False, "", _STALE)
+    assert (level, key) == ("warning", "engine_too_old")
+    assert kw == {"have": "1.4.1", "want": MIN_DX_VERSION,
+                  "schema": SCHEMA_VERSION}
+
+
+def test_a_healthy_rust_engine_says_nothing_at_all():
+    assert engine_status(True, DX_VERSION, []) is None
+
+
+def test_plain_python_with_no_binary_anywhere_says_nothing():
+    """dx simply not installed is a supported setup, not a fault."""
+    assert engine_status(False, "", []) is None
+
+
+def test_a_compatible_but_older_binary_is_a_note_not_a_warning():
+    older = f"{_version_tuple(MIN_DX_VERSION)[0]}.{_version_tuple(MIN_DX_VERSION)[1]}.0"
+    if _version_tuple(older) >= _version_tuple(DX_VERSION):
+        pytest.skip("no compatible version below DX_VERSION to test with")
+    level, key, _kw = engine_status(True, older, [])
+    assert (level, key) == ("info", "engine_behind")
+
+
+def _every_outcome():
+    """Every notice engine_status can produce, driven through the real
+    function rather than listed by hand."""
+    older = "1.5.0" if _version_tuple("1.5.0") < _version_tuple(DX_VERSION) \
+        else DX_VERSION
+    cases = [engine_status(True, DX_VERSION, _STALE),
+             engine_status(False, "", _STALE),
+             engine_status(True, older, [])]
+    return [c for c in cases if c]
+
+
+def test_every_severity_is_a_streamlit_method_name():
+    """app.py dispatches with getattr(st, level), so a typo is an
+    AttributeError in the sidebar for everyone. Streamlit is not installed in
+    CI, so pin the names instead of probing the module."""
+    for level, _key, _kw in _every_outcome():
+        assert level in {"warning", "info", "caption", "error", "success"}, \
+            f"{level!r} is not a Streamlit call"
+
+
+def test_every_message_exists_in_both_languages():
+    """These keys are no longer written literally in app.py — they arrive via
+    engine_status — so the app-wide t() scan cannot see them. Without this,
+    a missing key renders as its own name and nothing complains."""
+    import i18n
+
+    for _level, key, kw in _every_outcome():
+        for lang in ("pt", "en"):
+            assert key in i18n.TRANSLATIONS[lang], f"{lang} is missing {key}"
+            # and the placeholders must line up with what we pass
+            i18n.TRANSLATIONS[lang][key].format(**kw)
+
+
+def test_app_no_longer_decides_this_inline():
+    """The bug lived in an `if _dx_incompatible:` in app.py. Pin the decision
+    to the tested function so it cannot drift back into the view layer."""
+    app = (Path(__file__).resolve().parent.parent / "app.py").read_text(
+        encoding="utf-8")
+    assert "engine_status(" in app
+    assert 't("engine_too_old"' not in app, \
+        "app.py is choosing the message again instead of asking engine_status"
+
+
+def test_the_rust_banner_reports_the_same_schema_as_python():
+    """`dx --version` prints a schema number, and it said v6 for a month after
+    v7 shipped. A banner that lies about the schema is how a stale engine looks
+    trustworthy — the exact failure this module exists to prevent."""
+    cli = (Path(__file__).resolve().parent.parent / "rust" / "src" / "cli.rs"
+           ).read_text(encoding="utf-8")
+    # EVERY mention, not the first one: the banner exists in a short and a
+    # long form, and checking only one left the other stale -- a guard with a
+    # hole in it is the same as no guard.
+    found = [int(n) for n in re.findall(r"schema[:\s]*v(\d+)", cli)]
+    assert found, "the schema line vanished from the Rust version banner"
+    assert set(found) == {SCHEMA_VERSION}, (
+        f"Rust banner mentions schema v{sorted(set(found))}, Python "
+        f"SCHEMA_VERSION is {SCHEMA_VERSION}")

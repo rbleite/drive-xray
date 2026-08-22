@@ -38,6 +38,7 @@ from drive_xray import (
     open_db, fill_full_hashes, compute_dir_hashes, human,
     get_hash_version, HASH_VERSION, DX_VERSION, _duplicate_rows,
     dx_supports_schema, _version_tuple, MIN_DX_VERSION, SCHEMA_VERSION,
+    engine_status,
     compute_folder_sizes, generate_cleanup_script,
     build_cleanup_plan, render_cleanup_script, execute_cleanup_plan,
     default_script_flavor, cleanup_script_suffix,
@@ -876,14 +877,13 @@ with st.sidebar:
                      f"Rust dx unavailable ({DX_FALLBACK_REASON}); "
                      "using the Python engine."))
     # a stale dx binary silently misses features (exclusions, cross-OS mount
-    # resolution, checkpointing) — warn when it doesn't match the app version
-    if _dx_incompatible:
-        _p, _v = _dx_incompatible[0]
-        st.warning(t("engine_too_old", have=_v, want=MIN_DX_VERSION,
-                     schema=SCHEMA_VERSION))
-    elif DX_IS_RUST and DX_BIN_VERSION and \
-            _version_tuple(DX_BIN_VERSION) < _version_tuple(DX_VERSION):
-        st.info(t("engine_behind", have=DX_BIN_VERSION, want=DX_VERSION))
+    # resolution, checkpointing) — say so, but only when it actually cost us
+    # the fast engine: the probe checks several locations and skipping an old
+    # copy in one of them is normal
+    _notice = engine_status(DX_IS_RUST, DX_BIN_VERSION, _dx_incompatible)
+    if _notice:
+        _level, _key, _kw = _notice
+        getattr(st, _level)(t(_key, **_kw))
 
     # ── self-update from GitHub ────────────────────────────────────────────
     with st.expander(t("upd_title"), expanded=False):
