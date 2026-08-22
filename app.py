@@ -50,7 +50,7 @@ from drive_xray import (
     tags_get, tags_set, tags_search, notes_get, notes_get_all, notes_set,
     compute_auto_tags, AUTO_TAGS_YAML_PATH, write_default_auto_tag_rules,
     get_auto_tag_rules,
-    search_drives, QueryError, stale_drives,
+    search_drives, QueryError, stale_drives, dedupe_readiness,
 )
 
 
@@ -2455,6 +2455,18 @@ with tab_compare:
             _xgroups = st.session_state["xdp_groups"]
             if not _xgroups:
                 st.info(t("cross_no_results"))
+                # "Nothing found" looks identical whether there are no
+                # duplicates or the search never compared anything: a .db that
+                # would not open, an index with no snapshot, or hashes made by
+                # different algorithm versions, which can never match.
+                _ready = dedupe_readiness(db_labels,
+                                          min_size=min_size_mb_x * 1024 * 1024)
+                if _ready["reasons"]:
+                    st.warning(t("cross_why_empty"))
+                    for _why in _ready["reasons"]:
+                        st.caption(f"• {_why}")
+                else:
+                    st.caption(t("cross_compared_ok", n=_ready["usable"]))
             else:
                 # ── metrics ─────────────────────────────────────────────────
                 _total_wasted = sum(g["wasted_bytes"] for g in _xgroups)
