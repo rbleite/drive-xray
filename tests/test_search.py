@@ -237,3 +237,86 @@ def test_an_unreadable_db_is_reported_and_the_rest_still_search(searchable, tmp_
                         check_mounted=False)
     assert res["errors"] and "Broken" in res["errors"][0]
     assert res["hits"], "a broken drive must not sink the whole search"
+
+
+# ── searching by kind ────────────────────────────────────────────────────────
+
+def test_the_categories_come_from_the_auto_tag_rules(monkeypatch):
+    """Not a second taxonomy: the same rules that drive auto-tagging, so a
+    category the user adds to auto_tags.yaml is searchable at once."""
+    import drive_xray as dx
+    from drive_xray import known_kinds
+    assert {"vídeo", "genómica", "NGS", "jogos"} <= set(known_kinds())
+
+    monkeypatch.setattr(dx, "get_auto_tag_rules",
+                        lambda: [(frozenset({"xyz"}), "inventado")])
+    assert known_kinds() == ["inventado"]
+    assert dx.parse_query("kind:inventado")["exts"] == {"xyz"}
+
+
+def test_an_unknown_kind_lists_the_real_ones():
+    with pytest.raises(QueryError, match="unknown kind"):
+        parse_query("kind:banana")
+    try:
+        parse_query("kind:banana")
+    except QueryError as exc:
+        assert "vídeo" in str(exc), "the error must say what IS available"
+
+
+def test_accents_are_not_required_to_type(searchable):
+    """`genómica` must be reachable as `genomica` — nobody should have to
+    produce the accent to run a search."""
+    from drive_xray import parse_query as pq
+    assert pq("kind:genomica")["exts"] == pq("kind:genómica")["exts"]
+    assert pq("kind:VIDEO")["exts"] == pq("kind:vídeo")["exts"]
+
+
+@pytest.fixture()
+def mixed_drive(tmp_path):
+    """One drive holding several kinds at once."""
+    root = tmp_path / "drive"
+    (root / "seq").mkdir(parents=True)
+    (root / "filmes").mkdir()
+    (root / "roms").mkdir()
+    (root / "seq" / "run1.fastq.gz").write_bytes(b"x" * 4096)
+    (root / "seq" / "aligned.bam").write_bytes(b"x" * 4096)
+    (root / "seq" / "notas.txt").write_bytes(b"x" * 10)
+    (root / "filmes" / "filme.mkv").write_bytes(b"x" * 4096)
+    (root / "roms" / "jogo.nsp").write_bytes(b"x" * 4096)
+    db = tmp_path / "d.db"
+    assert dx_py("index", str(root), "--db", str(db), "--label", "Mixed"
+                 ).returncode == 0
+    return [(db, "Mixed")]
+
+
+def test_a_kind_selects_only_that_kind(mixed_drive):
+    res = search_drives(mixed_drive, "kind:NGS", check_mounted=False)
+    names = sorted(Path(h["path"]).name for h in res["hits"])
+    assert names == ["aligned.bam", "run1.fastq.gz"]
+
+
+def test_compound_extensions_are_understood(mixed_drive):
+    """fastq.gz must count as NGS, not as an archive — the taxonomy treats it
+    as one extension and the search has to agree."""
+    ngs = search_drives(mixed_drive, "kind:NGS", check_mounted=False)
+    assert any(h["path"].endswith("run1.fastq.gz") for h in ngs["hits"])
+
+
+def test_kinds_combine_with_the_rest_of_the_query(mixed_drive):
+    res = search_drives(mixed_drive, "kind:jogos", check_mounted=False)
+    assert [Path(h["path"]).name for h in res["hits"]] == ["jogo.nsp"]
+    none = search_drives(mixed_drive, "kind:jogos >1GB", check_mounted=False)
+    assert none["hits"] == []
+
+
+def test_several_kinds_widen_the_search(mixed_drive):
+    res = search_drives(mixed_drive, "kind:vídeo kind:jogos",
+                        check_mounted=False)
+    assert sorted(Path(h["path"]).name for h in res["hits"]) == \
+        ["filme.mkv", "jogo.nsp"]
+
+
+def test_a_kind_alone_is_a_valid_search(mixed_drive):
+    """The picker in the UI sends only a kind, with no typed text."""
+    res = search_drives(mixed_drive, "kind:imagens", check_mounted=False)
+    assert res["hits"] == [] and res["total"] == 0     # none present, no error

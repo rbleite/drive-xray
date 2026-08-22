@@ -73,6 +73,9 @@ TRANSLATIONS = {
         "find_title": "Procurar em todas as drives",
         "find_intro": "Procura por nome, tamanho e data em **todos** os raios-x — mesmo nas drives que estão desligadas. O resultado diz-te em que drive está e o caminho lá dentro.",
         "find_label": "Pesquisa",
+        "find_help_title": "❓ Como pesquisar — nome, tamanho, data, tipo",
+        "find_kinds": "🗂️ Limitar a tipos de ficheiro",
+        "find_kinds_help": "Filtra por categoria em vez de por extensão: vídeo, música, genómica, NGS, jogos… As categorias vêm das regras de etiquetagem automática, e podes acrescentar as tuas em ~/.config/drive-xray/auto_tags.yaml.",
         "find_placeholder": "STP* type:folder",
         "find_button": "🔎 Procurar",
         "find_help": """Termos combinam-se com E (todos têm de ser verdade).
@@ -81,6 +84,7 @@ TRANSLATIONS = {
 **Tipo** — `type:folder` · `type:file`
 **Tamanho** — `>20GB` · `<100MB` · `size:1.5TB`
 **Data** — `modified<2024` antes de 2024 · `modified>2024` depois de 2024 · `modified:2024` durante 2024
+**Tipo** — `kind:vídeo` · `kind:genomica` · `kind:jogos` (ou usa o selector acima)
 **Onde** — `drive:8Tb` · `path:"HD Movies"`""",
         "find_no_drives": "Ainda não há drives indexadas para procurar.",
         "find_nothing": "Nada corresponde a `{q}` nas {n} drive(s) pesquisadas.",
@@ -468,6 +472,9 @@ TRANSLATIONS = {
         "find_title": "Search every drive",
         "find_intro": "Search by name, size and date across **all** x-rays — including drives that are unplugged. Results tell you which drive a thing is on, and where inside it.",
         "find_label": "Query",
+        "find_help_title": "❓ How to search — name, size, date, kind",
+        "find_kinds": "🗂️ Limit to file kinds",
+        "find_kinds_help": "Filter by category instead of by extension: video, music, genomics, NGS, games… Categories come from the auto-tag rules, and you can add your own in ~/.config/drive-xray/auto_tags.yaml.",
         "find_placeholder": "STP* type:folder",
         "find_button": "🔎 Search",
         "find_help": """Terms combine with AND (all must hold).
@@ -476,6 +483,7 @@ TRANSLATIONS = {
 **Type** — `type:folder` · `type:file`
 **Size** — `>20GB` · `<100MB` · `size:1.5TB`
 **Date** — `modified<2024` before 2024 · `modified>2024` after 2024 · `modified:2024` during 2024
+**Kind** — `kind:video` · `kind:genomica` · `kind:jogos` (or use the picker above)
 **Where** — `drive:8Tb` · `path:"HD Movies"`""",
         "find_no_drives": "No drives indexed yet to search.",
         "find_nothing": "Nothing matches `{q}` across the {n} drive(s) searched.",

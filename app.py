@@ -31,6 +31,7 @@ _dx_mtime = os.path.getmtime(_dx_mod.__file__)
 if getattr(_dx_mod, "_loaded_mtime", None) != _dx_mtime:
     _dx_mod = importlib.reload(_dx_mod)
     _dx_mod._loaded_mtime = _dx_mtime
+_dx_reload_if_stale = _dx_mod.reload_if_stale
 del _dx_mod, _dx_mtime
 
 from drive_xray import (
@@ -51,6 +52,7 @@ from drive_xray import (
     compute_auto_tags, AUTO_TAGS_YAML_PATH, write_default_auto_tag_rules,
     get_auto_tag_rules,
     search_drives, QueryError, stale_drives, dedupe_readiness,
+    known_kinds,
 )
 
 
@@ -222,8 +224,12 @@ st.set_page_config(page_title="drive-xray", layout="wide", page_icon="💾")
 
 
 # ---------- i18n ----------
+# Same staleness concern as drive_xray above, and quieter: a missing
+# translation key does not raise, it renders as the raw key name.
+import i18n as _i18n_mod
+_i18n_mod = _dx_reload_if_stale(_i18n_mod)
 
-from i18n import TRANSLATIONS
+TRANSLATIONS = _i18n_mod.TRANSLATIONS
 
 
 def t(key: str, **fmt) -> str:
@@ -1428,13 +1434,22 @@ with tab_find:
                              placeholder=t("find_placeholder"),
                              label_visibility="collapsed")
         _go = _fc2.button(t("find_button"), use_container_width=True)
-        with st.expander("?", expanded=False):
+
+        # Pick categories instead of memorising their names. These come from
+        # the auto-tag rules, so a category added to auto_tags.yaml shows up
+        # here without any code change.
+        _kinds = st.multiselect(t("find_kinds"), options=known_kinds(),
+                                key="find_kinds", help=t("find_kinds_help"))
+        with st.expander(t("find_help_title"), expanded=False):
             st.markdown(t("find_help"))
 
-        if _q and (_go or st.session_state.get("find_last") == _q):
-            st.session_state["find_last"] = _q
+        if (_q or _kinds) and (_go or st.session_state.get("find_last")
+                               == (_q, tuple(_kinds))):
+            st.session_state["find_last"] = (_q, tuple(_kinds))
             try:
-                _res = search_drives(_find_reg, _q, limit=500)
+                _full_q = " ".join(
+                    [_q] + [f'kind:"{k}"' for k in _kinds])
+                _res = search_drives(_find_reg, _full_q, limit=500)
             except QueryError as _exc:
                 st.error(t("find_bad_query", err=str(_exc)))
                 _res = None

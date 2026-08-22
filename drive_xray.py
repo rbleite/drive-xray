@@ -243,6 +243,12 @@ DEFAULT_AUTO_TAG_RULES: list[tuple[frozenset, str]] = [
         "arquivo"),
     (frozenset({"db", "sqlite", "sqlite3"}),
         "base de dados"),
+    # Games — disc images and cartridge dumps that stand for a whole title
+    (frozenset({"iso", "nsp", "xci", "nsz", "xcz", "wbfs", "rvz", "wad",
+                "cso", "chd", "pkg", "gb", "gba", "gbc", "nds", "3ds",
+                "z64", "n64", "v64", "nes", "sfc", "smc", "gcm", "rpx",
+                "wux"}),
+        "jogos"),
 ]
 
 # Back-compat alias (older code / tests referenced AUTO_TAG_RULES directly).
@@ -2176,6 +2182,30 @@ def compute_dir_hashes(conn: sqlite3.Connection,
     conn.commit()
 
 
+
+def reload_if_stale(module):
+    """Re-import `module` when its file on disk changed since it was loaded.
+
+    Streamlit re-executes the app script on every rerun, but `import` returns
+    whatever is already in memory. After an update with the app still running,
+    that means new code paths run against old module state -- names that only
+    exist in the new version raise ImportError, and data that only exists in
+    the new version (a translation key, a constant) silently reads as missing.
+
+    The second failure is the nastier one: nothing raises, so the app keeps
+    working while showing raw keys or falling back to defaults.
+    """
+    import importlib
+    try:
+        mtime = os.path.getmtime(module.__file__)
+    except (AttributeError, OSError):
+        return module
+    if getattr(module, "_loaded_mtime", None) != mtime:
+        module = importlib.reload(module)
+        module._loaded_mtime = mtime
+    return module
+
+
 def human(n: int) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024:
@@ -3995,6 +4025,35 @@ _BARE_CMP_RE = re.compile(r"^(>=|<=|>|<)(.+)$")
 _FIELD_CMP_RE = re.compile(r"^(\w+)\s*(>=|<=|>|<|=|:)\s*(.*)$", re.S)
 
 
+def known_kinds() -> list[str]:
+    """Every category name the auto-tag rules define, including any the user
+    added to auto_tags.yaml."""
+    seen, out = set(), []
+    for _exts, tag in get_auto_tag_rules():
+        if tag not in seen:
+            seen.add(tag)
+            out.append(tag)
+    return out
+
+
+def _kind_extensions(name: str) -> set[str] | None:
+    """Extensions belonging to a category, or None when it is not a category.
+    Matched case- and accent-insensitively so `kind:genomica` finds
+    `genómica` -- nobody should have to type the accent to search."""
+    want = _fold(name)
+    hit: set[str] = set()
+    for exts, tag in get_auto_tag_rules():
+        if _fold(tag) == want:
+            hit |= set(exts)
+    return hit or None
+
+
+def _fold(text: str) -> str:
+    """Lowercase and strip accents, for matching names a person typed."""
+    return "".join(c for c in unicodedata.normalize("NFD", text.lower())
+                   if unicodedata.category(c) != "Mn")
+
+
 def parse_size(text: str) -> int:
     """'20GB' -> bytes. Binary units (1 GB = 1024 MB), matching how the rest of
     the app reports sizes."""
@@ -4066,7 +4125,7 @@ def parse_query(query: str) -> dict:
     """
     f: dict = {"names": [], "paths": [], "drives": [], "is_dir": None,
                "size_min": None, "size_max": None,
-               "mtime_min": None, "mtime_max": None}
+               "mtime_min": None, "mtime_max": None, "kinds": [], "exts": set()}
     if not query or not query.strip():
         raise QueryError("empty query")
 
@@ -4096,6 +4155,17 @@ def parse_query(query: str) -> dict:
                 f["paths"].append(value.lower())
             elif field == "name":
                 f["names"].append(value.lower())
+            elif field in ("kind", "tipo"):
+                # Reuses the auto-tag taxonomy rather than inventing a second
+                # one, so a category the user added to auto_tags.yaml is
+                # searchable here the moment they add it.
+                exts = _kind_extensions(value)
+                if exts is None:
+                    raise QueryError(
+                        f"unknown kind {value!r} — known kinds: "
+                        + ", ".join(known_kinds()))
+                f["kinds"].append(value.lower())
+                f["exts"] |= exts
             else:
                 raise QueryError(
                     f"unknown field {field!r} — try name, path, type, drive,"
@@ -4104,7 +4174,8 @@ def parse_query(query: str) -> dict:
         f["names"].append(term.lower())         # bare word: match the name
 
     if not any((f["names"], f["paths"], f["drives"], f["is_dir"] is not None,
-                f["size_min"], f["size_max"], f["mtime_min"], f["mtime_max"])):
+                f["size_min"], f["size_max"], f["mtime_min"], f["mtime_max"],
+                f["kinds"])):
         raise QueryError("nothing to search for")
     return f
 
@@ -4169,6 +4240,11 @@ def _sql_prefilter(f: dict) -> tuple[str, list]:
     for sub in f["paths"]:
         where.append("LOWER(p.full_path) LIKE ?"); params.append(f"%{sub}%")
     # A leading literal in a glob is a free prefix filter for SQLite.
+    if f["exts"]:
+        # one LIKE per extension is still far cheaper than reading every row
+        ors = " OR ".join("LOWER(p.segment) LIKE ?" for _ in f["exts"])
+        where.append(f"({ors})")
+        params.extend(f"%.{e}" for e in sorted(f["exts"]))
     for pat in f["names"]:
         head = re.split(r"[*?\[]", pat, 1)[0]
         if head:
@@ -4227,6 +4303,8 @@ def search_drives(db_labels, query: str, limit: int = 500,
 
             for full_path, segment, is_dir, size, mtime in rows:
                 if f["names"] and not _name_matches(segment, f["names"]):
+                    continue
+                if f["exts"] and _file_ext(segment or "") not in f["exts"]:
                     continue
                 total += 1
                 if len(hits) >= limit:
