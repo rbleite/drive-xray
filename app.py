@@ -37,6 +37,7 @@ del _dx_mod, _dx_mtime
 from drive_xray import (
     open_db, fill_full_hashes, compute_dir_hashes, human,
     get_hash_version, HASH_VERSION, DX_VERSION, _duplicate_rows,
+    dx_supports_schema, _version_tuple, MIN_DX_VERSION, SCHEMA_VERSION,
     compute_folder_sizes, generate_cleanup_script,
     build_cleanup_plan, render_cleanup_script, execute_cleanup_plan,
     default_script_flavor, cleanup_script_suffix,
@@ -108,6 +109,11 @@ DB_DIR.mkdir(parents=True, exist_ok=True)
 # commands (index / refresh / snapshot / compact). The Python script is
 # always used for the in-process helpers (drive_info, dup_file_groups,
 # treemap_rows, …) because no subprocess is involved there.
+# candidates rejected for being older than the schema, kept so the sidebar can
+# say WHY the fast engine is not in use
+_dx_incompatible: list[tuple[str, str]] = []
+
+
 def _dx_probe(cand: str) -> str | None:
     """A candidate only counts as the Rust engine if `dx --version` runs and
     identifies itself — any executable that merely happens to be called `dx`
@@ -118,7 +124,15 @@ def _dx_probe(cand: str) -> str | None:
                              text=True, timeout=10)
         first = (out.stdout or "").strip().splitlines()[:1]
         if out.returncode == 0 and first and first[0].startswith("dx "):
-            return first[0].split()[1]
+            ver = first[0].split()[1]
+            # A binary older than the current schema is REFUSED, not merely
+            # flagged. It reads a migrated .db without complaining and returns
+            # wrong answers -- a slow correct engine beats a fast wrong one,
+            # and a warning the user can scroll past is not a safeguard.
+            if not dx_supports_schema(ver):
+                _dx_incompatible.append((cand, ver))
+                return None
+            return ver
         return None
     except Exception:
         return None
@@ -863,8 +877,13 @@ with st.sidebar:
                      "using the Python engine."))
     # a stale dx binary silently misses features (exclusions, cross-OS mount
     # resolution, checkpointing) — warn when it doesn't match the app version
-    if DX_IS_RUST and DX_BIN_VERSION and DX_BIN_VERSION != DX_VERSION:
-        st.warning(t("engine_stale", have=DX_BIN_VERSION, want=DX_VERSION))
+    if _dx_incompatible:
+        _p, _v = _dx_incompatible[0]
+        st.warning(t("engine_too_old", have=_v, want=MIN_DX_VERSION,
+                     schema=SCHEMA_VERSION))
+    elif DX_IS_RUST and DX_BIN_VERSION and \
+            _version_tuple(DX_BIN_VERSION) < _version_tuple(DX_VERSION):
+        st.info(t("engine_behind", have=DX_BIN_VERSION, want=DX_VERSION))
 
     # ── self-update from GitHub ────────────────────────────────────────────
     with st.expander(t("upd_title"), expanded=False):

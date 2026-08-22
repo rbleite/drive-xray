@@ -47,8 +47,18 @@ READ_CHUNK = 1024 * 1024
 # v1 = head + tail; v2 = head + middle + tail (defends against bio formats like
 # BAM/VCF where header/footer are stable but body varies).
 HASH_VERSION = 2
-DX_VERSION = "1.4.1"
-SCHEMA_VERSION = 6  # see _migrate_to_v6 / SCHEMA constant below
+DX_VERSION = "1.5.0"
+
+# First dx release whose Rust engine understands SCHEMA_VERSION. The two move
+# independently -- Python migrates a .db the moment the app runs, while the
+# Rust binary is downloaded separately and can sit unchanged for months. v7
+# landed ten days AFTER the 1.4.1 release, so every published binary before
+# 1.5.0 reads a schema it was never built for.
+MIN_DX_VERSION = "1.5.0"
+SCHEMA_VERSION = 7  # see _migrate_to_v7 / SCHEMA constant below.
+# Was left at 6 when v7 landed; `dx --version` reported a schema it no
+# longer wrote, which is the same class of staleness that let an
+# incompatible Rust binary pass unnoticed.
 SKIP_DIR_NAMES = {
     ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems",
     ".DocumentRevisions-V100", ".PKInstallSandboxManager",
@@ -2206,6 +2216,35 @@ def reload_if_stale(module):
     return module
 
 
+
+def _version_tuple(v: str) -> tuple:
+    """'1.4.1' -> (1, 4, 1). Unparsable text sorts lowest, so anything we
+    cannot read is treated as too old rather than assumed fine."""
+    parts = []
+    for chunk in str(v or "").strip().lstrip("v").split("."):
+        digits = ""
+        for ch in chunk:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break                      # stop at 1.5.0-rc1 style suffixes
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts) if parts else (0,)
+
+
+def dx_supports_schema(binary_version: str) -> bool:
+    """Whether a dx binary of this version can be trusted with the current
+    schema.
+
+    This exists because the previous check compared the binary's version to
+    DX_VERSION for EQUALITY, and neither was bumped when the schema changed --
+    so a binary predating v7 matched exactly, raised no warning, and quietly
+    produced wrong answers on migrated databases. A version label nobody
+    increments is not a compatibility check.
+    """
+    return _version_tuple(binary_version) >= _version_tuple(MIN_DX_VERSION)
+
+
 def human(n: int) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024:
@@ -3740,7 +3779,8 @@ def dedupe_readiness(db_labels: list[tuple[Path, str]],
     for db_path, label in db_labels:
         info = {"label": label, "db": str(db_path), "readable": False,
                 "has_snapshot": False, "hash_version": None,
-                "files": 0, "eligible": 0, "comparable": 0, "error": None}
+                "files": 0, "eligible": 0, "comparable": 0,
+                "db_label": None, "root": None, "error": None}
         try:
             conn = open_db(Path(db_path))
         except Exception as exc:
@@ -3757,6 +3797,13 @@ def dedupe_readiness(db_labels: list[tuple[Path, str]],
             try:
                 info["hash_version"] = get_hash_version(conn)
                 versions.add(info["hash_version"])
+            except Exception:
+                pass
+            try:
+                row = conn.execute(
+                    "SELECT label, root_path FROM drive LIMIT 1").fetchone()
+                if row:
+                    info["db_label"], info["root"] = row[0], row[1]
             except Exception:
                 pass
             info["files"] = conn.execute(
@@ -3821,6 +3868,26 @@ def dedupe_readiness(db_labels: list[tuple[Path, str]],
                                for d in per_drive
                                if d["hash_version"] not in (None, newest)))
             or ", ".join(behind))
+    # Two indexes of the SAME physical drive are correctly collapsed into one:
+    # the same file seen twice is not wasted space, and deleting one copy frees
+    # nothing. But collapsing them silently looks exactly like a broken search,
+    # so say it.
+    by_identity: dict[tuple, list[str]] = {}
+    for d in per_drive:
+        if not d["has_snapshot"]:
+            continue
+        key = (d["db_label"], d["files"])
+        if key[0] is None:
+            continue
+        by_identity.setdefault(key, []).append(d["label"])
+    for (dbl, nfiles), labels in by_identity.items():
+        if len(labels) > 1:
+            reasons.append(
+                f"{' and '.join(labels)} are two indexes of the same drive "
+                f"(both say '{dbl}', both {nfiles:,} files), so they count as "
+                f"one — the same file seen twice is not a duplicate. Remove "
+                f"the stale index to compare the rest.")
+
     # A drive whose files nearly all share one inode contributes almost
     # nothing, however healthy its counts look.
     for d in per_drive:

@@ -114,6 +114,21 @@ to this project (same parent folder), it gets its own shortcuts too — its
 to start it at login. media-catalog ships its own `build_app.sh` as well.)
 
 
+## The fast engine and the database schema
+
+The Rust binary is downloaded separately from Releases, while the Python engine
+migrates a `.db` the moment the app opens it. The two drift, and a binary older
+than the current schema reads migrated databases **without complaining** and
+returns wrong answers -- a cross-drive duplicate search finding nothing on
+drives full of duplicates, for instance.
+
+The app now refuses such a binary outright and falls back to Python, saying so
+in the sidebar. A slow correct engine beats a fast wrong one, and a warning
+someone can scroll past is not a safeguard.
+
+If you see that message, update `dx` -- or delete it, and the Python engine
+takes over with no other change.
+
 ## Building the Rust engine from source
 
 Only needed if you want to build it yourself -- the Windows installer and the
