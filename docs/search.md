@@ -37,6 +37,28 @@ anything else is a substring. Both ignore case, including accented characters �
 Matching is on the **name**, not the path. `STP*` finds a folder called
 `STP_projects`, not every file inside it. Use `path:` for that.
 
+### Kind
+
+Rather than remembering extensions, search by what a file *is*:
+
+```bash
+dx find "kind:genomica"          # fastq, bam, vcf, bed, fasta …
+dx find "kind:jogos >4GB"        # iso, nsp, xci, wbfs …
+dx find "kind:video kind:musica" # several kinds widen the search
+```
+
+The categories are the **same ones that drive auto-tagging** — nanopore, NGS,
+variantes, genómica, imagiologia, PDF, documentos, tabelas, apresentações,
+música, vídeo, imagens, código, scripts, arquivo, base de dados, jogos — so
+anything you add to `~/.config/drive-xray/auto_tags.yaml` becomes searchable
+the moment you add it. There is no second list to maintain.
+
+Accents are optional: `kind:genomica` finds `genómica`. An unknown kind lists
+the real ones instead of silently finding nothing. Compound extensions are
+understood, so `run.fastq.gz` counts as NGS rather than as an archive.
+
+In the UI there is a picker, so you do not have to type any of this.
+
 ### Type, size, date, place
 
 | | |
@@ -50,6 +72,7 @@ Matching is on the **name**, not the path. `STP*` finds a folder called
 | `modified:2024` | at some point during 2024 |
 | `drive:8Tb` | only that drive |
 | `path:"HD Movies"` | path contains this text |
+| `kind:vídeo` | a category (see above) |
 
 Dates accept `2024`, `2024-06` or `2024-06-15`. A period is treated as a range,
 which is why `<` and `>` sit outside it and `>=` / `<=` reach inside: `>2024`
