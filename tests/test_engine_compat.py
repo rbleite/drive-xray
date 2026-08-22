@@ -97,6 +97,21 @@ def test_the_python_and_rust_versions_agree():
         f"Cargo.toml says {rust_ver}, drive_xray.py says {DX_VERSION}")
 
 
+def test_the_lockfile_agrees_too():
+    """Cargo.lock records the package's OWN version, and CI builds with
+    --locked. Bumping Cargo.toml alone fails every Rust job with a message
+    about the lock file rather than about the version -- which is exactly what
+    happened here, and cost a full CI round to read."""
+    lock = (Path(__file__).resolve().parent.parent / "rust" / "Cargo.lock"
+            ).read_text(encoding="utf-8")
+    m = re.search(r'\[\[package\]\]\nname = "drive-xray"\nversion = "([^"]+)"',
+                  lock)
+    assert m, "the drive-xray entry vanished from Cargo.lock"
+    assert m.group(1) == DX_VERSION, (
+        f"Cargo.lock says {m.group(1)}, drive_xray.py says {DX_VERSION} — "
+        f"run `cargo update --offline -p drive-xray`")
+
+
 def test_the_minimum_is_not_ahead_of_what_we_ship():
     """MIN_DX_VERSION > DX_VERSION would refuse the engine we just built."""
     assert _version_tuple(MIN_DX_VERSION) <= _version_tuple(DX_VERSION)
