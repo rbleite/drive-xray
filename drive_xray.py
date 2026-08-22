@@ -3740,7 +3740,7 @@ def dedupe_readiness(db_labels: list[tuple[Path, str]],
     for db_path, label in db_labels:
         info = {"label": label, "db": str(db_path), "readable": False,
                 "has_snapshot": False, "hash_version": None,
-                "files": 0, "eligible": 0, "error": None}
+                "files": 0, "eligible": 0, "comparable": 0, "error": None}
         try:
             conn = open_db(Path(db_path))
         except Exception as exc:
@@ -3767,6 +3767,24 @@ def dedupe_readiness(db_labels: list[tuple[Path, str]],
                 "SELECT COUNT(*) FROM entries_core WHERE snapshot_id=?"
                 " AND is_dir=0 AND size>=? AND partial_hash IS NOT NULL",
                 (sid, min_size)).fetchone()[0]
+            # ...and how many survive its (inode, device) de-duplication.
+            # That guard exists for APFS firmlinks, but a filesystem that
+            # reports the same inode for every file -- 0 is the usual value on
+            # some Windows and FAT/exFAT paths -- collapses the whole drive to
+            # a single comparable file. The search then completes normally and
+            # finds nothing, with a healthy-looking eligible count.
+            info["comparable"] = conn.execute(
+                "SELECT COUNT(*) FROM ("
+                "  SELECT DISTINCT inode, device FROM entries_core"
+                "   WHERE snapshot_id=? AND is_dir=0 AND size>=?"
+                "     AND partial_hash IS NOT NULL"
+                "     AND inode IS NOT NULL AND device IS NOT NULL"
+                ") ", (sid, min_size)).fetchone()[0] + conn.execute(
+                "SELECT COUNT(*) FROM entries_core"
+                " WHERE snapshot_id=? AND is_dir=0 AND size>=?"
+                "   AND partial_hash IS NOT NULL"
+                "   AND (inode IS NULL OR device IS NULL)",
+                (sid, min_size)).fetchone()[0]
         finally:
             conn.close()
         per_drive.append(info)
@@ -3790,11 +3808,28 @@ def dedupe_readiness(db_labels: list[tuple[Path, str]],
             f"comparison needs at least 2")
     if len(versions) > 1:
         # THE silent one: hashes made by different algorithms never match, so
-        # the search completes normally and finds nothing.
+        # the search completes normally and finds nothing. Name the drives --
+        # "versions differ" without saying which is not actionable.
+        newest = max(versions)
+        behind = sorted(d["label"] for d in per_drive
+                        if d["hash_version"] not in (None, newest))
         reasons.append(
-            f"partial-hash versions differ across drives ({', '.join('v' + str(v) for v in sorted(versions))})"
-            f" — hashes from different versions can never match. Re-index so"
-            f" they agree.")
+            f"partial-hash versions differ, so those hashes can never match. "
+            f"Re-index with the current version (v{newest}): "
+            + ", ".join(f"{lbl} (v{d})" for lbl, d in
+                        sorted((d["label"], d["hash_version"])
+                               for d in per_drive
+                               if d["hash_version"] not in (None, newest)))
+            or ", ".join(behind))
+    # A drive whose files nearly all share one inode contributes almost
+    # nothing, however healthy its counts look.
+    for d in per_drive:
+        if d["eligible"] > 10 and d["comparable"] <= max(2, d["eligible"] // 50):
+            reasons.append(
+                f"{d['label']}: only {d['comparable']:,} of {d['eligible']:,} "
+                f"files are actually comparable — this filesystem reports the "
+                f"same inode for many files, so they collapse into one. "
+                f"Re-index it from a machine that reports real inodes.")
     return {"drives": per_drive, "usable": len(usable),
             "hash_versions": sorted(versions), "reasons": reasons,
             "can_compare": len(usable) >= 2 and len(versions) <= 1}

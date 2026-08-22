@@ -131,3 +131,101 @@ def test_readiness_reads_no_files(two_drives, tmp_path):
         dedupe_readiness(two_drives)
     finally:
         dx.partial_hash, dx.full_hash = original_partial, original_full
+
+
+def test_the_drives_behind_are_named_not_just_the_versions(two_drives):
+    """'versions differ (v1, v2)' is not actionable — you cannot re-index a
+    version number. The reason has to say WHICH drive to re-index."""
+    import sqlite3
+    conn = sqlite3.connect(two_drives[1][0])
+    conn.execute("UPDATE drive SET hash_version=1")
+    conn.commit()
+    conn.close()
+
+    why = " ".join(dedupe_readiness(two_drives)["reasons"])
+    assert "DriveB" in why, "the drive that is behind must be named"
+    assert "v2" in why, "and the version to re-index to"
+
+
+def test_per_drive_versions_are_reported(two_drives):
+    """So the panel can show a column, not just a sentence."""
+    r = dedupe_readiness(two_drives)
+    assert all(d["hash_version"] == 2 for d in r["drives"])
+
+
+def test_a_drive_whose_files_share_one_inode_is_flagged(tmp_path):
+    """The invisible one. cross_dedupe de-duplicates by (inode, device) to
+    handle APFS firmlinks. A filesystem reporting the same inode for every file
+    -- 0 is common on some Windows and FAT/exFAT paths -- collapses the whole
+    drive to a single comparable file. The counts look healthy, the search runs
+    to completion, and it finds nothing.
+    """
+    import sqlite3
+
+    root = tmp_path / "flat"
+    root.mkdir()
+    for i in range(40):
+        (root / f"f{i}.bin").write_bytes(bytes([i]) * 2048)
+    db = tmp_path / "flat.db"
+    assert dx_py("index", str(root), "--db", str(db),
+                 "--label", "FlatFS").returncode == 0
+
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE entries_core SET inode=0, device=1")
+    conn.commit()
+    conn.close()
+
+    r = dedupe_readiness([(db, "FlatFS")], min_size=0)
+    d = r["drives"][0]
+    assert d["eligible"] >= 40, "the drive looks perfectly healthy by count"
+    assert d["comparable"] == 1, "yet only one file can ever be compared"
+    assert any("actually comparable" in why for why in r["reasons"])
+
+
+def test_a_healthy_filesystem_is_not_flagged_for_inodes(two_drives):
+    """Real inodes must not trip the warning, or it becomes noise."""
+    r = dedupe_readiness(two_drives, min_size=0)
+    assert not any("actually comparable" in why for why in r["reasons"])
+    for d in r["drives"]:
+        assert d["comparable"] == d["eligible"]
+
+
+def test_collapsed_inodes_really_do_cost_the_search(tmp_path):
+    """Not a theoretical warning. With five files shared between two drives,
+    the search finds five groups. Collapse one drive's inodes and at most ONE
+    file from it can take part, so four matches vanish -- with no error and no
+    explanation from the search itself.
+
+    Which one survives is arbitrary, which is why the readiness counts are the
+    thing to look at rather than the groups.
+    """
+    import sqlite3
+    from drive_xray import cross_dedupe
+
+    a, b = tmp_path / "A", tmp_path / "B"
+    a.mkdir()
+    b.mkdir()
+    for i in range(5):
+        blob = bytes([i + 1]) * (1024 * 1024 + i)
+        (a / f"shared{i}.bin").write_bytes(blob)
+        (b / f"shared{i}.bin").write_bytes(blob)
+    da, db_ = tmp_path / "a.db", tmp_path / "b.db"
+    assert dx_py("index", str(a), "--db", str(da), "--label", "A").returncode == 0
+    assert dx_py("index", str(b), "--db", str(db_), "--label", "B").returncode == 0
+    pair = [(da, "A"), (db_, "B")]
+
+    assert len(cross_dedupe(pair, min_size=0)) == 5
+
+    conn = sqlite3.connect(da)
+    conn.execute("UPDATE entries_core SET inode=0, device=1")
+    conn.commit()
+    conn.close()
+
+    after = cross_dedupe(pair, min_size=0)
+    assert len(after) <= 1, "only one file from A can still take part"
+
+    r = dedupe_readiness(pair, min_size=0)
+    drive_a = next(d for d in r["drives"] if d["label"] == "A")
+    assert drive_a["comparable"] == 1 and drive_a["eligible"] == 5
+    assert any("actually comparable" in why for why in r["reasons"]) or \
+        drive_a["eligible"] <= 10       # below the noise threshold, but visible

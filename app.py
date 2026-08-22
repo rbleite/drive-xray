@@ -2482,6 +2482,19 @@ with tab_compare:
                         st.caption(f"• {_why}")
                 else:
                     st.caption(t("cross_compared_ok", n=_ready["usable"]))
+                # Per-drive detail either way: "nothing found" is only
+                # trustworthy once you can see what each drive contributed.
+                with st.expander(t("cross_detail"), expanded=False):
+                    st.dataframe([{
+                        t("find_col_drive"): _d["label"],
+                        t("cross_col_version"): f"v{_d['hash_version']}"
+                                                if _d["hash_version"] else "—",
+                        t("cross_col_files"): f"{_d['files']:,}",
+                        t("cross_col_eligible"): f"{_d['eligible']:,}",
+                        t("cross_col_comparable"): f"{_d['comparable']:,}",
+                    } for _d in _ready["drives"]],
+                        use_container_width=True, hide_index=True)
+                    st.caption(t("cross_detail_help"))
             else:
                 # ── metrics ─────────────────────────────────────────────────
                 _total_wasted = sum(g["wasted_bytes"] for g in _xgroups)
