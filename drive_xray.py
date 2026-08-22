@@ -3619,32 +3619,47 @@ def verify_integrity(db_path: Path, full: bool = False, progress=None) -> dict:
     and never re-reads such files, so this is the only thing that catches rot
     before a good backup gets overwritten with a corrupt copy.
 
+    The bias is deliberate: a false alarm costs you one look at a file, a
+    missed corruption costs you the file. So a mtime that moved by a whole-hour
+    multiple counts as unchanged, which means an edit landing exactly an hour
+    after the index does get reported as rot. Findings therefore carry both
+    dates, so the answer is visible rather than taken on faith.
+
+    Differing content is only rot when NOTHING claims to have written the file.
+    A size-preserving edit — a database, a disk image, a RAW whose metadata was
+    rewritten in place — changes the hash too, and is reported as `edited`
+    rather than raising the alarm. mtimes are compared with the same tolerance
+    the indexer uses, because exFAT stores local time and the same untouched
+    drive reads hours off on another machine; comparing exactly would file real
+    rot under `edited` on exactly the drives most likely to have it.
+
     Requires the drive mounted. `full=True` uses the whole-file BLAKE2b (only for
     files that have a stored full_hash); otherwise the fast partial hash
     (head+middle+tail) is compared — a cheap screen that catches most rot.
 
     Returns:
-        {root_mounted, total, ok, corrupted:[{rel_path,size}], size_changed,
-         missing, unreadable, mode}
+        {root_mounted, total, ok, corrupted:[{rel_path,size}],
+         edited:[{rel_path,size}], size_changed, missing, unreadable, mode}
     """
     conn = open_db(db_path)
     row = conn.execute("SELECT root_path FROM drive LIMIT 1").fetchone()
     root = resolve_root(conn, row[0]) if row and row[0] else None
     sid = latest_snapshot_id(conn)
     res = {"root_mounted": bool(root and root.is_dir()), "total": 0, "ok": 0,
-           "corrupted": [], "size_changed": 0, "missing": 0, "unreadable": 0,
-           "mode": "full" if full else "partial", "root": str(root or "")}
+           "corrupted": [], "edited": [], "size_changed": 0, "missing": 0,
+           "unreadable": 0, "mode": "full" if full else "partial",
+           "root": str(root or "")}
     if sid is None or not res["root_mounted"]:
         conn.close()
         return res
     rows = conn.execute(
-        "SELECT rel_path, size, partial_hash, full_hash FROM entries"
+        "SELECT rel_path, size, mtime, partial_hash, full_hash FROM entries"
         " WHERE snapshot_id=? AND is_dir=0 AND is_symlink=0 AND error IS NULL"
         "   AND partial_hash IS NOT NULL", (sid,),
     ).fetchall()
     conn.close()
     res["total"] = len(rows)
-    for i, (rel, size, phash, fhash) in enumerate(rows):
+    for i, (rel, size, mtime, phash, fhash) in enumerate(rows):
         p = root / rel
         try:
             st = p.stat()
@@ -3661,7 +3676,14 @@ def verify_integrity(db_path: Path, full: bool = False, progress=None) -> dict:
         if new is None:
             res["unreadable"] += 1
         elif new != stored:
-            res["corrupted"].append({"rel_path": rel, "size": size})
+            # The content moved. Whether that is alarming depends entirely on
+            # whether anything claims to have written the file.
+            item = {"rel_path": rel, "size": size,
+                    "db_mtime": mtime, "disk_mtime": st.st_mtime}
+            if _mtimes_equivalent(st.st_mtime, mtime or 0.0):
+                res["corrupted"].append(item)
+            else:
+                res["edited"].append(item)
         else:
             res["ok"] += 1
         if progress and i % 500 == 0:
@@ -3844,6 +3866,38 @@ def _force_utf8_output() -> None:
         except Exception:
             pass   # not a reconfigurable TextIO (redirected/captured) — fine
 
+
+
+
+# ── verification ────────────────────────────────────────────────────────────
+# Everything else here trusts what indexing recorded. This is the one pass that
+# goes back and asks whether the disk still agrees -- because a file can rot in
+# place: same size, same mtime, different bytes. `refresh` cannot see that (it
+# reuses hashes for anything unchanged by size+mtime, which is the whole point
+# of it being fast), so without this the .db would keep a stale hash for ever
+# and `compare` would happily match two drives on it.
+
+def stale_drives(days: int = 180, now: float | None = None) -> list[dict]:
+    """Registered drives not indexed for `days`, oldest neglect first.
+
+    Drives that sit in a drawer are the ones that quietly die, and an index
+    nobody has refreshed describes a disk as it was, not as it is.
+    """
+    now = time.time() if now is None else now
+    out = []
+    for e in registry_list():
+        raw = (e.get("last_indexed") or "").strip()
+        if not raw:
+            continue
+        try:
+            when = datetime.datetime.fromisoformat(raw).timestamp()
+        except ValueError:
+            continue
+        age = (now - when) / 86400.0
+        if age >= days:
+            out.append({**e, "days": int(age), "last_indexed_ts": when})
+    out.sort(key=lambda d: -d["days"])
+    return out
 
 
 # ── search ──────────────────────────────────────────────────────────────────
@@ -4218,7 +4272,10 @@ def main():
     pe.add_argument("--workers", type=int, default=None, metavar="N",
                     help="I/O threads for full hashing (default: min(4, cpu_count))")
 
-    sub.add_parser("drives", help="list all drives registered in the central index")
+    pdrv = sub.add_parser("drives",
+                          help="list all drives registered in the central index")
+    pdrv.add_argument("--stale-days", type=int, default=180,
+                      help="warn about drives not indexed for this long (default 180)")
 
     pfind = sub.add_parser(
         "find", help="search every x-ray by name, size and date")
@@ -4458,6 +4515,14 @@ def main():
                     f"  {e['label']:<20}  {e['last_indexed']:<20}"
                     f"  {e['root']:<40}  {e['db']}{status}"
                 )
+            stale = stale_drives(args.stale_days)
+            if stale:
+                print(f"\n  Not indexed for over {args.stale_days} days — an"
+                      f" index this old describes the disk as it WAS:")
+                for d in stale:
+                    months = d["days"] // 30
+                    print(f"    {d['label']:<20}  {d['days']:,} days"
+                          f"  (~{months} month{'s' if months != 1 else ''})")
     elif args.cmd == "find":
         if args.dbs:
             db_labels = []
@@ -4606,12 +4671,29 @@ def main():
             if not r["root_mounted"]:
                 sys.exit(f"drive not mounted at {r['root']} — cannot verify.")
             print(f"verify ({r['mode']}) of {r['total']} files: {r['ok']} ok · "
-                  f"{len(r['corrupted'])} CORRUPTED · {r['size_changed']} changed · "
+                  f"{len(r['corrupted'])} CORRUPTED · {len(r['edited'])} edited · "
+                  f"{r['size_changed']} changed · "
                   f"{r['missing']} missing · {r['unreadable']} unreadable")
+            if r["edited"]:
+                # Content differs but something wrote the file, so this is a
+                # save, not rot. Listed because a surprise here is worth a look.
+                print(f"\n  {len(r['edited'])} file(s) edited in place "
+                      f"(content and date both moved):")
+                for e in r["edited"][:10]:
+                    print(f"     {human(e['size'] or 0):>10}  {e['rel_path']}")
+                if len(r["edited"]) > 10:
+                    print(f"     … +{len(r['edited'])-10} more")
             if r["corrupted"]:
                 print("\n  ⚠️  BIT-ROT — content changed with same size+mtime:")
+                print("     (both dates shown: if they differ by a whole hour,"
+                      " this may be an edit on an exFAT drive)")
                 for c in r["corrupted"][:100]:
-                    print(f"     {human(c['size'] or 0):>10}  {c['rel_path']}")
+                    def _d(v):
+                        return (datetime.datetime.fromtimestamp(v)
+                                .strftime("%Y-%m-%d %H:%M") if v else "?")
+                    print(f"     {human(c['size'] or 0):>10}  {c['rel_path']}"
+                          f"\n       indexed {_d(c.get('db_mtime'))}"
+                          f"  ·  on disk {_d(c.get('disk_mtime'))}")
                 if len(r["corrupted"]) > 100:
                     print(f"     … +{len(r['corrupted'])-100} more")
                 sys.exit(1)
