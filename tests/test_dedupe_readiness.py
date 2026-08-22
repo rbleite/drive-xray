@@ -229,3 +229,63 @@ def test_collapsed_inodes_really_do_cost_the_search(tmp_path):
     assert drive_a["comparable"] == 1 and drive_a["eligible"] == 5
     assert any("actually comparable" in why for why in r["reasons"]) or \
         drive_a["eligible"] <= 10       # below the noise threshold, but visible
+
+
+# ── two indexes of the same drive ────────────────────────────────────────────
+
+@pytest.fixture()
+def indexed_twice(tmp_path):
+    """The same drive indexed twice, as happens when a drive is re-registered
+    from a second machine. The internal label is the drive's own, so both
+    copies carry it."""
+    root = tmp_path / "drive"
+    root.mkdir()
+    for i in range(3):
+        (root / f"f{i}.bin").write_bytes(bytes([i + 1]) * (2 * 1024 * 1024))
+    a, b = tmp_path / "a.db", tmp_path / "b.db"
+    for db in (a, b):
+        assert dx_py("index", str(root), "--db", str(db),
+                     "--label", "MyBook").returncode == 0
+    # the registry labels differ — that is how they end up listed separately
+    return [(a, "MyBook"), (b, "MyBook-Laptop")]
+
+
+def test_the_same_drive_twice_is_reported_not_silently_collapsed(indexed_twice):
+    """The screenshot case: identical file counts, healthy everything, and no
+    duplicates. Collapsing them is CORRECT -- the same file seen twice is not
+    wasted space -- but doing it without a word is indistinguishable from a
+    broken search."""
+    r = dedupe_readiness(indexed_twice, min_size=1024 * 1024)
+    assert all(d["readable"] and d["eligible"] > 0 for d in r["drives"]), \
+        "nothing about either index looks wrong"
+    why = " ".join(r["reasons"])
+    assert "same drive" in why
+    assert "MyBook" in why and "MyBook-Laptop" in why
+
+
+def test_the_report_names_both_and_says_what_to_do(indexed_twice):
+    why = " ".join(dedupe_readiness(indexed_twice)["reasons"])
+    assert "not a duplicate" in why, "explain why zero is the right answer"
+    assert "Remove" in why, "and what to do about it"
+
+
+def test_two_genuinely_different_drives_are_not_confused(two_drives):
+    """Different drives must never be reported as the same one, or the advice
+    would be to delete a real index."""
+    r = dedupe_readiness(two_drives, min_size=0)
+    assert not any("same drive" in why for why in r["reasons"])
+
+
+def test_engines_disagree_on_what_counts_as_one_drive(indexed_twice):
+    """cross_dedupe skips groups confined to a single drive LABEL. Python is
+    handed registry labels, which differ; the Rust CLI reads the label from
+    inside each .db, where both say the same thing. Same command, same data,
+    two different answers -- pinned here because it is the disagreement that
+    makes the result depend on which engine happens to be installed."""
+    from drive_xray import cross_dedupe
+
+    registry_labels = cross_dedupe(indexed_twice, min_size=1024 * 1024)
+    db_labels = cross_dedupe([(db, "MyBook") for db, _ in indexed_twice],
+                             min_size=1024 * 1024)
+    assert len(registry_labels) == 3, "distinct labels: every file pairs up"
+    assert db_labels == [], "identical labels: everything collapses"

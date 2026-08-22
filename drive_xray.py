@@ -3740,7 +3740,8 @@ def dedupe_readiness(db_labels: list[tuple[Path, str]],
     for db_path, label in db_labels:
         info = {"label": label, "db": str(db_path), "readable": False,
                 "has_snapshot": False, "hash_version": None,
-                "files": 0, "eligible": 0, "comparable": 0, "error": None}
+                "files": 0, "eligible": 0, "comparable": 0,
+                "db_label": None, "root": None, "error": None}
         try:
             conn = open_db(Path(db_path))
         except Exception as exc:
@@ -3757,6 +3758,13 @@ def dedupe_readiness(db_labels: list[tuple[Path, str]],
             try:
                 info["hash_version"] = get_hash_version(conn)
                 versions.add(info["hash_version"])
+            except Exception:
+                pass
+            try:
+                row = conn.execute(
+                    "SELECT label, root_path FROM drive LIMIT 1").fetchone()
+                if row:
+                    info["db_label"], info["root"] = row[0], row[1]
             except Exception:
                 pass
             info["files"] = conn.execute(
@@ -3821,6 +3829,26 @@ def dedupe_readiness(db_labels: list[tuple[Path, str]],
                                for d in per_drive
                                if d["hash_version"] not in (None, newest)))
             or ", ".join(behind))
+    # Two indexes of the SAME physical drive are correctly collapsed into one:
+    # the same file seen twice is not wasted space, and deleting one copy frees
+    # nothing. But collapsing them silently looks exactly like a broken search,
+    # so say it.
+    by_identity: dict[tuple, list[str]] = {}
+    for d in per_drive:
+        if not d["has_snapshot"]:
+            continue
+        key = (d["db_label"], d["files"])
+        if key[0] is None:
+            continue
+        by_identity.setdefault(key, []).append(d["label"])
+    for (dbl, nfiles), labels in by_identity.items():
+        if len(labels) > 1:
+            reasons.append(
+                f"{' and '.join(labels)} are two indexes of the same drive "
+                f"(both say '{dbl}', both {nfiles:,} files), so they count as "
+                f"one — the same file seen twice is not a duplicate. Remove "
+                f"the stale index to compare the rest.")
+
     # A drive whose files nearly all share one inode contributes almost
     # nothing, however healthy its counts look.
     for d in per_drive:
