@@ -145,3 +145,19 @@ def test_an_old_binary_is_rejected_by_the_probe(monkeypatch, tmp_path):
     assert reported == "1.4.1"
     assert not dx_supports_schema(reported), \
         "this binary must never be handed index or dedupe work"
+
+
+def test_the_rust_banner_reports_the_same_schema_as_python():
+    """`dx --version` prints a schema number, and it said v6 for a month after
+    v7 shipped. A banner that lies about the schema is how a stale engine looks
+    trustworthy — the exact failure this module exists to prevent."""
+    cli = (Path(__file__).resolve().parent.parent / "rust" / "src" / "cli.rs"
+           ).read_text(encoding="utf-8")
+    # EVERY mention, not the first one: the banner exists in a short and a
+    # long form, and checking only one left the other stale -- a guard with a
+    # hole in it is the same as no guard.
+    found = [int(n) for n in re.findall(r"schema[:\s]*v(\d+)", cli)]
+    assert found, "the schema line vanished from the Rust version banner"
+    assert set(found) == {SCHEMA_VERSION}, (
+        f"Rust banner mentions schema v{sorted(set(found))}, Python "
+        f"SCHEMA_VERSION is {SCHEMA_VERSION}")
