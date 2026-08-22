@@ -50,7 +50,7 @@ from drive_xray import (
     tags_get, tags_set, tags_search, notes_get, notes_get_all, notes_set,
     compute_auto_tags, AUTO_TAGS_YAML_PATH, write_default_auto_tag_rules,
     get_auto_tag_rules,
-    search_drives, QueryError,
+    search_drives, QueryError, stale_drives,
 )
 
 
@@ -992,6 +992,16 @@ with st.sidebar:
     else:
         st.info(t("no_drives"))
 
+    # Drives that sit in a drawer are the ones that quietly die, and an index
+    # nobody has refreshed describes a disk as it was, not as it is.
+    _stale = stale_drives(180)
+    if _stale:
+        with st.expander(f"⏳ {t('stale_title')} ({len(_stale)})", expanded=False):
+            for _d in _stale:
+                st.caption(f"**{_d['label']}** — "
+                           + t("stale_warn", days=f"{_d['days']:,}",
+                               months=_d["days"] // 30))
+
     st.divider()
     st.subheader(t("index_new_drive"))
 
@@ -1510,12 +1520,16 @@ with tab_summary:
             if not _vr["root_mounted"]:
                 st.warning(t("verify_unmounted", root=_vr["root"]))
             else:
-                vc1, vc2, vc3, vc4 = st.columns(4)
+                vc1, vc2, vc3, vc4, vc5 = st.columns(5)
                 vc1.metric("✅ OK", f"{_vr['ok']:,}")
                 vc2.metric("⚠️ " + t("verify_corrupt_short"),
                            f"{len(_vr['corrupted']):,}")
-                vc3.metric(t("verify_changed"), f"{_vr['size_changed']:,}")
-                vc4.metric(t("verify_missing"), f"{_vr['missing']:,}")
+                # Content differs, but the date moved too -- a save, not rot.
+                vc3.metric(t("verify_edited"),
+                           f"{len(_vr.get('edited', [])):,}",
+                           help=t("verify_edited_help"))
+                vc4.metric(t("verify_changed"), f"{_vr['size_changed']:,}")
+                vc5.metric(t("verify_missing"), f"{_vr['missing']:,}")
                 if _vr["corrupted"]:
                     st.error(t("verify_rot_found", n=len(_vr["corrupted"])))
                     st.dataframe(
