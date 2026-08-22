@@ -2176,6 +2176,30 @@ def compute_dir_hashes(conn: sqlite3.Connection,
     conn.commit()
 
 
+
+def reload_if_stale(module):
+    """Re-import `module` when its file on disk changed since it was loaded.
+
+    Streamlit re-executes the app script on every rerun, but `import` returns
+    whatever is already in memory. After an update with the app still running,
+    that means new code paths run against old module state -- names that only
+    exist in the new version raise ImportError, and data that only exists in
+    the new version (a translation key, a constant) silently reads as missing.
+
+    The second failure is the nastier one: nothing raises, so the app keeps
+    working while showing raw keys or falling back to defaults.
+    """
+    import importlib
+    try:
+        mtime = os.path.getmtime(module.__file__)
+    except (AttributeError, OSError):
+        return module
+    if getattr(module, "_loaded_mtime", None) != mtime:
+        module = importlib.reload(module)
+        module._loaded_mtime = mtime
+    return module
+
+
 def human(n: int) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024:

@@ -31,6 +31,7 @@ _dx_mtime = os.path.getmtime(_dx_mod.__file__)
 if getattr(_dx_mod, "_loaded_mtime", None) != _dx_mtime:
     _dx_mod = importlib.reload(_dx_mod)
     _dx_mod._loaded_mtime = _dx_mtime
+_dx_reload_if_stale = _dx_mod.reload_if_stale
 del _dx_mod, _dx_mtime
 
 from drive_xray import (
@@ -222,8 +223,12 @@ st.set_page_config(page_title="drive-xray", layout="wide", page_icon="💾")
 
 
 # ---------- i18n ----------
+# Same staleness concern as drive_xray above, and quieter: a missing
+# translation key does not raise, it renders as the raw key name.
+import i18n as _i18n_mod
+_i18n_mod = _dx_reload_if_stale(_i18n_mod)
 
-from i18n import TRANSLATIONS
+TRANSLATIONS = _i18n_mod.TRANSLATIONS
 
 
 def t(key: str, **fmt) -> str:
