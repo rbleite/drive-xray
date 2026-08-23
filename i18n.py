@@ -326,6 +326,8 @@ TRANSLATIONS = {
         "action_delete": "Apagar (rm — irreversível!)",
         "cleanup_generate": "Gerar plano",
         "cleanup_ready": "✅ Plano gerado: {n} acções propostas.",
+        "cleanup_clones": "🧬 {n} destes ficheiros são clones APFS de uma cópia que fica — partilham os mesmos blocos, por isso apagá-los não liberta nada. Espaço real a recuperar: **{real}** (a contagem simples diria {logical}).",
+        "cleanup_clone_unknown": "Em {n} grupo(s) não foi possível verificar clones (drive desligada, ou sistema de ficheiros sem esta informação). Para esses, o valor indicado é um máximo teórico, não uma medição.",
         "cleanup_unconfirmed": (
             "Nenhuma acção proposta, mas há {n} grupo(s) por confirmar "
             "(~{size}). A limpeza só age sobre duplicados confirmados por "
@@ -734,6 +736,8 @@ TRANSLATIONS = {
         "action_delete": "Delete (rm — irreversible!)",
         "cleanup_generate": "Generate plan",
         "cleanup_ready": "✅ Plan generated: {n} proposed actions.",
+        "cleanup_clones": "🧬 {n} of these files are APFS clones of a copy being kept — they share the same blocks, so deleting them frees nothing. Space actually reclaimable: **{real}** (a naive count would say {logical}).",
+        "cleanup_clone_unknown": "{n} group(s) could not be checked for clones (drive not mounted, or a filesystem without this information). For those, the figure shown is a theoretical maximum, not a measurement.",
         "cleanup_unconfirmed": (
             "No actions proposed, but {n} group(s) are unconfirmed (~{size}). "
             "Cleanup only acts on duplicates confirmed by full hash — two "

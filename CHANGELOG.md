@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The cleanup plan promised space that deleting could not free, on any APFS
+  volume.** `cp -c`, Finder's Duplicate and several backup tools create clones:
+  a second file with its own inode and its own path, sharing the original's
+  data blocks. Nothing in `stat()` distinguishes one from a real copy —
+  measured on a live volume, a 10 MB original, its clone and a genuine copy all
+  report `size=10485760 blocks=20480`, and `du` says `10M` to all three.
+  Deleting the clone moved `df`'s available column by exactly zero bytes.
+
+  The plan counted a clone as a full duplicate, so the figure on the button
+  was 2× the truth on a cloned pair — and in the dangerous direction, since
+  that number is the one a user acts on before running a script against their
+  own files.
+
+  Clones are now detected by asking where the bytes physically live:
+  `fcntl(F_LOG2PHYS_EXT)` maps a file's byte 0 to a device offset, and copies
+  landing on the same offset share their extents. Only the groups the hash has
+  already confirmed identical are probed, with the drive mounted — a handful of
+  syscalls at plan time, no schema change and no cost during indexing.
+
+  Reported three ways, because a total nobody can break down is not
+  actionable: `total_freeable` is now what deleting actually returns,
+  `total_logical` keeps the old arithmetic for comparison, and each action
+  carries `frees_bytes` and `clone_of` naming the file it shares blocks with.
+  The generated script says it inline, next to the `rm`.
+
+  Where the probe cannot answer — not macOS, drive unmounted, no read
+  permission — the group is counted at the logical upper bound and labelled as
+  such. Reporting zero there would be a fabrication in the other direction.
+
+  Note for anyone porting this: `struct log2phys` is **packed, 20 bytes**, not
+  the 24 that natural alignment gives. Getting it wrong does not raise — it
+  returns fields read from the wrong offsets, which look like plausible large
+  numbers.
+
+  Cross-drive figures are unaffected: clones cannot span filesystems.
+
 ## [1.5.1] — 2026-08-22
 
 Released because v1.5.0 shipped with a version banner that misreported the

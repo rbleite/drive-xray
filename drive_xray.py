@@ -33,6 +33,7 @@ import re
 import shutil
 import sqlite3
 import stat
+import struct
 import sys
 import time
 import unicodedata
@@ -2277,6 +2278,83 @@ def engine_status(is_rust: bool, bin_version: str,
     return None
 
 
+# ── APFS clones ──────────────────────────────────────────────────────────────
+#
+# `cp -c`, Finder's Duplicate and several backup tools create APFS clones: a
+# second file with its own inode and its own path, sharing the original's data
+# blocks. Deleting one frees nothing until the last reference goes.
+#
+# Nothing in stat() distinguishes a clone from a real copy. Measured on APFS,
+# a 10 MB original, its clone and a genuine copy all report size=10485760 and
+# blocks=20480, and `du` says 10M to all three. Deleting the clone moved df's
+# "available" column by exactly zero bytes.
+#
+# So the duplicate accounting -- size × (copies − 1), corrected only for
+# hardlinks -- counts a clone as a full duplicate and promises space that
+# deleting it cannot free. The error is 2× on a cloned pair, and in the
+# dangerous direction: the cleanup plan is the one number a user acts on.
+#
+# The only available signal is where the bytes physically live.
+# fcntl(F_LOG2PHYS_EXT) maps a logical offset within a file to a byte offset
+# on the device; two files whose byte 0 lands on the same device offset are
+# sharing extents.
+#
+# The struct is PACKED -- 20 bytes, not the 24 that natural alignment gives.
+# Getting that wrong does not raise: it returns fields read from the wrong
+# offsets, which look like plausible large numbers. Verified against a live
+# APFS volume, where the kernel wrote l2p_contigbytes at byte 4, not byte 8.
+
+_F_LOG2PHYS_EXT = 65
+_LOG2PHYS_FMT = "=IQQ"      # uint32 l2p_flags, off_t l2p_contigbytes,
+                            # off_t l2p_devoffset -- packed, 20 bytes
+
+
+def physical_offset(path: str | Path) -> int | None:
+    """Device byte offset of a file's first data block, or None.
+
+    None means "cannot tell" -- not macOS, a filesystem without the fcntl, no
+    read permission, an empty or sparse file, an unmounted drive. Callers must
+    treat it as unknown rather than as "not a clone": assuming independence is
+    exactly the assumption that overstates reclaimable space.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        import fcntl
+    except ImportError:                                   # pragma: no cover
+        return None
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except OSError:
+        return None
+    try:
+        buf = struct.pack(_LOG2PHYS_FMT, 0, 4096, 0)
+        out = fcntl.fcntl(fd, _F_LOG2PHYS_EXT, buf)
+        _flags, _contig, devoffset = struct.unpack(_LOG2PHYS_FMT, out)
+        return devoffset if devoffset > 0 else None
+    except (OSError, struct.error, ValueError):
+        return None
+    finally:
+        os.close(fd)
+
+
+def reclaimable_bytes(size: int, offsets: list[int | None]) -> int | None:
+    """How much deleting all but one of these copies actually frees.
+
+    `offsets` are physical offsets, one per copy, in the order they appear;
+    None where the probe failed. All copies are assumed byte-identical, which
+    is the caller's job to establish.
+
+    Copies sharing an offset share their blocks, so the group occupies
+    size × (distinct offsets) on disk and collapses to size × 1. Returns None
+    if any offset is unknown -- a partial answer here is worse than none,
+    because it would be reported as fact.
+    """
+    if not offsets or any(o is None for o in offsets):
+        return None
+    return size * (len(set(offsets)) - 1)
+
+
 def human(n: int) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024:
@@ -2827,8 +2905,11 @@ def build_cleanup_plan(db_path: Path, min_size: int,
     stamp = time.strftime("%Y%m%dT%H%M%S")
     plan_groups: list[dict] = []
     total_freeable = 0
+    total_logical = 0
     n_actions = 0
     n_hardlink_notes = 0
+    n_clone_actions = 0
+    n_clone_unknown = 0
 
     for gnum, (fh, _count) in enumerate(groups, 1):
         members = conn.execute(
@@ -2873,12 +2954,37 @@ def build_cleanup_plan(db_path: Path, min_size: int,
         keeper_hardlinks = [sib_rp for sib_rp, _, _ in reps[keeper_idx][4]]
         n_hardlink_notes += len(keeper_hardlinks)
 
+        # Which of these copies are APFS clones of each other. Only the
+        # already-confirmed duplicates get probed -- a handful of files with
+        # the drive mounted, not a pass over the index.
+        offsets = {rp: physical_offset(f"{root_path}/{rp}")
+                   for _k, rp, _s, _m, _sib in reps}
+        clones_known = all(o is not None for o in offsets.values())
+        if not clones_known:
+            n_clone_unknown += 1
+        # the keeper survives, so its extent is never released
+        held: dict[int, str] = {}
+        keeper_off = offsets[keeper_rp]
+        if keeper_off is not None:
+            held[keeper_off] = keeper_rp
+
         actions: list[dict] = []
         for i, (key, rp, sz, mt, siblings) in enumerate(reps):
             if i == keeper_idx:
                 continue
             safe = rp.replace("/", "__").replace(" ", "_")
             sib_rels = [sib_rp for sib_rp, _, _ in siblings]
+            off = offsets[rp]
+            # A clone of something we are keeping frees nothing. Say so per
+            # action rather than only in the total, because the per-file list
+            # is what the user reads before running the script.
+            if clones_known and off in held:
+                frees, clone_of = 0, held[off]
+                n_clone_actions += 1
+            else:
+                frees, clone_of = sz, None
+                if off is not None:
+                    held[off] = rp
             actions.append({
                 "rel_path": rp,
                 "full_path": f"{root_path}/{rp}",
@@ -2887,9 +2993,14 @@ def build_cleanup_plan(db_path: Path, min_size: int,
                 # only meaningful for action="quarantine"
                 "dest_name": f"g{gnum:04d}_i{i}__{safe}",
                 "hardlinks": sib_rels,
+                # bytes this action actually returns to the filesystem;
+                # differs from size only for APFS clones
+                "frees_bytes": frees,
+                "clone_of": clone_of,
             })
             n_actions += 1
-            total_freeable += sz
+            total_freeable += frees
+            total_logical += sz
             n_hardlink_notes += len(sib_rels)
 
         plan_groups.append({
@@ -2939,7 +3050,15 @@ def build_cleanup_plan(db_path: Path, min_size: int,
         "groups": plan_groups,
         "n_actions": n_actions,
         "n_hardlink_notes": n_hardlink_notes,
+        # what deleting actually returns to the filesystem
         "total_freeable": total_freeable,
+        # what the old size × (copies − 1) arithmetic would have promised;
+        # equal to total_freeable unless APFS clones were found
+        "total_logical": total_logical,
+        "n_clone_actions": n_clone_actions,
+        # groups where at least one copy could not be probed — their figures
+        # are the logical upper bound, not a measurement
+        "n_clone_unknown": n_clone_unknown,
         # candidates excluded for want of a confirmed full hash
         "n_unconfirmed_groups": n_unconfirmed_groups,
         "unconfirmed_bytes": unconfirmed_bytes,
@@ -3084,6 +3203,9 @@ def render_cleanup_script(plan: dict, flavor: str | None = None) -> str:
                     f"(Join-Path $QUARANTINE {dst_name})  # {human(a['size'])}"
                     if ps else
                     f'mv   {full}  "$QUARANTINE"/{dst_name}  # {human(a["size"])}')
+            if a.get("clone_of"):
+                out.append(f"#    {hl} APFS clone of {a['clone_of']} — shares "
+                           f"its blocks, so this frees 0 bytes")
             for sib_rp in a["hardlinks"]:
                 sib_full = q(f"{root_path}{sep}{sib_rp.replace('/', sep)}"
                              if ps else f"{root_path}/{sib_rp}")
@@ -3099,6 +3221,18 @@ def render_cleanup_script(plan: dict, flavor: str | None = None) -> str:
         f"# Reclaimable : ~{human(plan['total_freeable'])}"
         f" ({plan['total_freeable']} bytes)",
     ]
+    # Only say it when it happened: on every other filesystem these two are
+    # equal and the extra lines would be noise.
+    if plan.get("n_clone_actions"):
+        out.append(
+            f"# APFS clones : {plan['n_clone_actions']} of the files above "
+            f"share blocks with a copy being kept and free nothing "
+            f"(logical total would be {human(plan.get('total_logical', 0))})")
+    if plan.get("n_clone_unknown"):
+        out.append(
+            f"# NOTE        : {plan['n_clone_unknown']} group(s) could not be "
+            f"probed for clones — their share of the figure above is an upper "
+            f"bound, not a measurement")
     text = "\n".join(out) + "\n"
     # UTF-8 BOM: without it Windows PowerShell 5.1 decodes the file as the
     # ANSI code page and mangles every accented file name in it.
