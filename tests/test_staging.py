@@ -66,11 +66,13 @@ def test_cloud_path_staged_and_moved_back(tmp_path):
     conn.commit()
     conn.close()
 
-    # …and finalize moves it back over the cloud copy
-    msg = finalize_staged(target, db)
-    assert msg.startswith("moved to")
-    assert not target.exists()
-    assert _marker(db) == "indexed"
+    # …and finalize publishes it back over the cloud copy.
+    # Asserted on the data, not on the wording: this used to require the
+    # message to start with "moved to", which pinned the implementation rather
+    # than the behaviour and broke the moment publishing stopped being a move.
+    finalize_staged(target, db)
+    assert not target.exists(), "the staged copy must be cleaned up"
+    assert _marker(db) == "indexed", "the finished data must reach the cloud copy"
 
 
 def test_interrupted_run_resumes_from_staged(tmp_path):
@@ -353,3 +355,84 @@ def test_a_database_it_cannot_read_read_only_still_gets_migrated(tmp_path,
     r = dx.dedupe_readiness([(db, "L")])
     assert calls, "it must try read-only first"
     assert r["drives"][0]["readable"], "and fall back rather than give up"
+
+
+# ── publishing must not strand a connection someone else holds ───────────────
+#
+# Reported against media-catalog, which shares this mechanism: after the first
+# staged command ever run, every write from the app died with "attempt to
+# write a readonly database".
+#
+# shutil.move replaces the directory entry, so the destination gets a NEW
+# inode and any already-open connection is left on the old, unlinked one.
+#
+# Here the same defect was quieter and worse. The write SUCCEEDS -- no error
+# at all -- against a file nothing can ever read again. Verified before the
+# fix: a table created through such a connection committed cleanly and was
+# absent from the file on disk.
+
+def test_publishing_keeps_the_destination_file_identity(tmp_path):
+    db = tmp_path / "OneDrive" / "x.db"
+    _mkdb(db, "original")
+    target, staged = stage_for_write(db)
+    assert staged
+    before = db.stat().st_ino
+
+    finalize_staged(target, db)
+    assert db.stat().st_ino == before, "publishing replaced the file"
+
+
+def test_a_write_through_a_held_connection_still_reaches_the_disk(tmp_path):
+    """The silent half of the bug, stated as an assertion. An open connection
+    must keep writing to the real file, not to an unlinked one."""
+    db = tmp_path / "OneDrive" / "x.db"
+    _mkdb(db, "original")
+
+    held = sqlite3.connect(db)                 # the app, already attached
+    held.execute("SELECT v FROM t").fetchone()
+
+    target, staged = stage_for_write(db)
+    assert staged
+    finalize_staged(target, db)
+
+    held.execute("CREATE TABLE IF NOT EXISTS from_the_app (x)")
+    held.commit()
+    held.close()
+
+    fresh = sqlite3.connect(db)
+    names = {r[0] for r in fresh.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    fresh.close()
+    assert "from_the_app" in names, \
+        "the write committed without error but never reached the file"
+
+
+def test_a_first_run_with_no_destination_is_still_a_move(tmp_path):
+    """Nothing can hold a file that does not exist, so that path stays cheap."""
+    db = tmp_path / "OneDrive" / "x.db"
+    target, staged = stage_for_write(db)
+    assert staged
+    _mkdb(target, "fresh")
+    finalize_staged(target, db)
+    assert db.exists() and not target.exists()
+    assert _marker(db) == "fresh"
+
+
+def test_an_unreadable_destination_is_replaced_rather_than_refused(tmp_path):
+    """A truncated sync or a failed download leaves a file that is not a
+    database. There is no identity worth preserving in rubble, and refusing
+    would strand the finished index in the staging dir."""
+    db = tmp_path / "OneDrive" / "x.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"this is not a database at all" * 20)
+
+    target, staged = stage_for_write(db)
+    assert staged
+    # the copy carries the same rubble, so start it over — an index writing
+    # here would have recreated it anyway
+    target.unlink()
+    _mkdb(target, "good")
+
+    finalize_staged(target, db)
+    assert _marker(db) == "good"
+    assert not target.exists()
