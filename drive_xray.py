@@ -4461,9 +4461,85 @@ def parse_date_range(text: str) -> tuple[float, float]:
     return start.timestamp(), end.timestamp()
 
 
+_OPS = (">=", "<=", ">", "<")
+# a term that is nothing but an operator: "> 1GB" typed with a space
+_LONE_OP_RE = re.compile(r"^(>=|<=|>|<)$")
+# "*.mkv>1GB" — a value glued to an operator. The prefix must NOT be a bare
+# word, or this would tear "modified>=2024" and "size>1GB" apart.
+_GLUED_RE = re.compile(r"^(.+?)(>=|<=|>|<)(.+)$")
+
+
+def _normalise_terms(tokens: list[tuple[str, bool]]) -> list[str]:
+    """Repair the spellings of a comparison that people actually type.
+
+    The splitter cuts on whitespace, so `*.mkv > 1GB` arrived as three terms
+    and the last two fell through to the name filter: the search then looked
+    for files whose name contains `>` AND contains `1gb`, found none, and
+    reported no results. A query that silently means something else is worse
+    than one that fails — it looks like an answer.
+
+    Four spellings, all of them reasonable, and only one used to work:
+
+        *.mkv >1GB      ok before
+        *.mkv > 1GB     became a name search for ">" and "1gb"
+        *.mkv>1GB       became a name search for "*.mkv>1gb"
+        size> 1GB       became a name search for "1gb"
+
+    Quoted terms are left exactly as typed, so `"report > draft"` still
+    searches for that name.
+    """
+    out: list[str] = []
+    out_quoted: list[bool] = []
+
+    def emit(text: str, quoted: bool = False) -> None:
+        out.append(text)
+        out_quoted.append(quoted)
+
+    i = 0
+    while i < len(tokens):
+        text, quoted = tokens[i]
+        if quoted:
+            # A quoted phrase is a literal name, never a comparison. Without
+            # this, `"report > final"` was read as a field named `report`.
+            emit(f"name:{text}", True)
+            i += 1
+            continue
+
+        # "> 1GB" / ">= 2024" — an operator with its value one token away.
+        # Also reattach a field name left stranded in front of it, or
+        # `modified >= 2024` becomes the name `modified` plus a SIZE of 2024.
+        if _LONE_OP_RE.match(text) or any(
+                text.endswith(op) and len(text) > len(op) for op in _OPS):
+            if i + 1 >= len(tokens):
+                raise QueryError(
+                    f"{text!r} has nothing to compare against — try "
+                    f"something like '>1GB' or 'modified>=2024'")
+            joined = text + tokens[i + 1][0]
+            if (_LONE_OP_RE.match(text) and out and not out_quoted[-1]
+                    and re.fullmatch(r"\w+", out[-1])):
+                joined = out.pop() + joined
+                out_quoted.pop()
+            emit(joined)
+            i += 2
+            continue
+
+        # "*.mkv>1GB" — split, unless the prefix is a field name
+        m = _GLUED_RE.match(text)
+        if m and not re.fullmatch(r"\w+", m.group(1)):
+            emit(m.group(1))
+            emit(m.group(2) + m.group(3))
+            i += 1
+            continue
+
+        emit(text)
+        i += 1
+    return out
+
+
 def _split_terms(query: str) -> list[str]:
     """Split on whitespace, keeping "quoted phrases" together."""
-    out, buf, quote = [], [], ""
+    out: list[tuple[str, bool]] = []
+    buf, quote, was_quoted = [], "", False
     for ch in query:
         if quote:
             if ch == quote:
@@ -4472,14 +4548,20 @@ def _split_terms(query: str) -> list[str]:
                 buf.append(ch)
         elif ch in "\"'":
             quote = ch
+            # Only a term that OPENS with a quote is a literal phrase.
+            # `path:"ricardo/hd movies"` quotes the value of a field, and
+            # treating that as a literal name broke the path filter entirely.
+            if not buf:
+                was_quoted = True
         elif ch.isspace():
             if buf:
-                out.append("".join(buf)); buf = []
+                out.append(("".join(buf), was_quoted))
+                buf, was_quoted = [], False
         else:
             buf.append(ch)
     if buf:
-        out.append("".join(buf))
-    return out
+        out.append(("".join(buf), was_quoted))
+    return _normalise_terms(out)
 
 
 def parse_query(query: str) -> dict:

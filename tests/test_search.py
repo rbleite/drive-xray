@@ -320,3 +320,58 @@ def test_a_kind_alone_is_a_valid_search(mixed_drive):
     """The picker in the UI sends only a kind, with no typed text."""
     res = search_drives(mixed_drive, "kind:imagens", check_mounted=False)
     assert res["hits"] == [] and res["total"] == 0     # none present, no error
+
+
+# ── spacing around a comparison ──────────────────────────────────────────────
+#
+# `*.mkv > 1GB` returned nothing on a drive full of large .mkv files. The
+# splitter cuts on whitespace, so it arrived as three terms and the last two
+# fell through to the name filter: the search looked for files whose name
+# contains ">" AND contains "1gb", found none, and reported no results.
+#
+# Only one of the four reasonable spellings worked. The other three were not
+# errors -- they silently meant something else, which is the worst way for a
+# search to fail, because zero looks like an answer.
+
+EQUIVALENT = ["*.mkv >1GB", "*.mkv > 1GB", "*.mkv>1GB",
+              "*.mkv size>1GB", "*.mkv size > 1GB", "*.mkv size> 1GB"]
+
+
+@pytest.mark.parametrize("q", EQUIVALENT)
+def test_every_spelling_of_a_size_comparison_means_the_same(q):
+    f = parse_query(q)
+    assert f["size_min"] == 1024 ** 3 + 1, q
+    assert f["names"] == ["*.mkv"], f"stray tokens leaked into the name filter: {f['names']}"
+
+
+def test_a_spaced_date_comparison_is_not_read_as_a_size():
+    """The nastiest form of the bug: `modified >= 2024` left `modified` as a
+    name and applied 2024 as a SIZE, so it silently searched for files over
+    2024 bytes named "modified"."""
+    spaced = parse_query("modified >= 2024")
+    tight = parse_query("modified>=2024")
+    assert spaced["mtime_min"] == tight["mtime_min"]
+    assert spaced["size_min"] is None
+    assert spaced["names"] == []
+
+
+def test_an_operator_with_nothing_after_it_is_an_error():
+    """It used to become a name search for '>'."""
+    with pytest.raises(QueryError):
+        parse_query("*.mkv >")
+
+
+def test_a_quoted_phrase_containing_an_operator_stays_a_name():
+    """Quoting means literal. Without this, `"report > final"` was read as a
+    comparison on a field called `report`."""
+    f = parse_query('"relatorio > final"')
+    assert f["names"] == ["relatorio > final"]
+    assert f["size_min"] is None
+
+
+def test_spacing_does_not_disturb_the_other_fields():
+    f = parse_query("drive:8Tb type:file *.mkv > 20GB")
+    assert f["drives"] == ["8tb"]
+    assert f["is_dir"] == 0
+    assert f["names"] == ["*.mkv"]
+    assert f["size_min"] == 20 * 1024 ** 3 + 1
