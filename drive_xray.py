@@ -4096,6 +4096,175 @@ def verify_integrity(db_path: Path, full: bool = False, progress=None) -> dict:
 
 
 
+def drive_composition(db_labels: list[tuple[Path, str]],
+                      min_size: int = 0) -> dict:
+    """What each drive is actually made of, by content category.
+
+    Answers the question you have to answer before reorganising anything:
+    how many GB of photos, of video, of games, of genomics do I have, where
+    are they now, and how much would they need if I kept one copy of each.
+
+    Categories come from the auto-tag rules, so a category added to
+    auto_tags.yaml appears here without a code change. Anything whose
+    extension matches no rule is counted under "outros" rather than dropped —
+    a report that silently ignores half a drive is worse than no report.
+
+    Two totals, and the difference between them is the point:
+
+      total   — add up every drive. What you are storing today.
+      unique  — count a file present on several drives ONCE. What you would
+                need if each thing existed in exactly one place.
+
+    `total - unique` is the space a reorganisation could reclaim, and it is
+    also, uncomfortably, the redundancy you would be giving up. Which of the
+    two it is depends on whether those copies were deliberate.
+
+    Runs entirely off the indexes: no drive needs to be plugged in.
+    """
+    # extension -> category, built once from the active rules
+    ext_to_kind: dict[str, str] = {}
+    kind_order: list[str] = []
+    for exts, tag in get_auto_tag_rules():
+        if tag not in kind_order:
+            kind_order.append(tag)
+        for e in exts:
+            ext_to_kind.setdefault(e, tag)
+    OTHER = "outros"
+    compounds = tuple(sorted((e for e in ext_to_kind if "." in e),
+                             key=len, reverse=True))
+
+    per_drive: list[dict] = []
+    totals: dict[str, dict] = defaultdict(lambda: {"bytes": 0, "files": 0})
+    # identity -> (kind, size); a file seen on several drives lands here once
+    seen: dict[tuple, tuple[str, int]] = {}
+    unhashed_bytes = 0
+    errors: list[str] = []
+
+    for db_path, label in db_labels:
+        info = {"label": label, "bytes": 0, "files": 0,
+                "by_kind": defaultdict(lambda: {"bytes": 0, "files": 0}),
+                "error": None}
+        try:
+            conn = open_db_readonly(Path(db_path))
+            conn.execute("SELECT 1 FROM entries_core LIMIT 1")
+        except Exception:
+            try:
+                conn = open_db(Path(db_path))
+            except Exception as exc:
+                info["error"] = str(exc)[:200]
+                errors.append(f"{label}: {info['error']}")
+                per_drive.append(info)
+                continue
+        try:
+            sid = latest_snapshot_id(conn)
+            if sid is None:
+                info["error"] = "no snapshot"
+                errors.append(f"{label}: no snapshot — index it first")
+                per_drive.append(info)
+                continue
+            rows = conn.execute(
+                "SELECT rel_path, size, full_hash, partial_hash FROM entries"
+                " WHERE snapshot_id=? AND is_dir=0 AND size >= ?",
+                (sid, min_size),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        for rel, size, fh, ph in rows:
+            size = size or 0
+            name = rel.replace("\\", "/").rsplit("/", 1)[-1]
+            kind = ext_to_kind.get(_file_ext(name, compounds), OTHER)
+            info["bytes"] += size
+            info["files"] += 1
+            info["by_kind"][kind]["bytes"] += size
+            info["by_kind"][kind]["files"] += 1
+            totals[kind]["bytes"] += size
+            totals[kind]["files"] += 1
+
+            # Identity for the unique count. A full hash is proof; a partial
+            # hash plus the exact size is strong enough for a planning figure.
+            # With neither, the file counts as its own — overstating `unique`
+            # rather than pretending two files are the same, and the caller is
+            # told how much of the total that covers.
+            if fh:
+                key = ("f", fh)
+            elif ph:
+                key = ("p", ph, size)
+            else:
+                key = ("u", label, rel)
+                unhashed_bytes += size
+            seen.setdefault(key, (kind, size))
+
+        info["by_kind"] = dict(info["by_kind"])
+        per_drive.append(info)
+
+    unique: dict[str, dict] = defaultdict(lambda: {"bytes": 0, "files": 0})
+    for kind, size in seen.values():
+        unique[kind]["bytes"] += size
+        unique[kind]["files"] += 1
+
+    kinds = [k for k in kind_order if k in totals]
+    if OTHER in totals:
+        kinds.append(OTHER)
+
+    return {
+        "drives": per_drive,
+        "kinds": kinds,
+        "totals": {k: dict(totals[k]) for k in kinds},
+        "unique": {k: dict(unique[k]) for k in kinds},
+        "total_bytes": sum(v["bytes"] for v in totals.values()),
+        "unique_bytes": sum(v["bytes"] for v in unique.values()),
+        "unhashed_bytes": unhashed_bytes,
+        "errors": errors,
+    }
+
+
+def print_composition(rep: dict) -> None:
+    """Render drive_composition() as a table you can plan against."""
+    kinds = rep["kinds"]
+    drives = [d for d in rep["drives"] if not d["error"]]
+    if not kinds or not drives:
+        for e in rep["errors"]:
+            print(f"  ! {e}", file=sys.stderr)
+        print("  nothing to report")
+        return
+
+    wl = max(9, max(len(d["label"]) for d in drives))
+    wk = max(8, max(len(k) for k in kinds))
+    print(f"\n  {'drive':<{wl}}  " + "  ".join(f"{k:>{wk}}" for k in kinds)
+          + f"  {'TOTAL':>{wk}}")
+    print("  " + "-" * (wl + (wk + 2) * (len(kinds) + 1)))
+    for d in sorted(drives, key=lambda x: -x["bytes"]):
+        cells = []
+        for k in kinds:
+            b = d["by_kind"].get(k, {}).get("bytes", 0)
+            cells.append(f"{human(b) if b else '·':>{wk}}")
+        print(f"  {d['label']:<{wl}}  " + "  ".join(cells)
+              + f"  {human(d['bytes']):>{wk}}")
+
+    print("  " + "-" * (wl + (wk + 2) * (len(kinds) + 1)))
+    print(f"  {'stored':<{wl}}  " + "  ".join(
+        f"{human(rep['totals'][k]['bytes']):>{wk}}" for k in kinds)
+        + f"  {human(rep['total_bytes']):>{wk}}")
+    print(f"  {'one copy':<{wl}}  " + "  ".join(
+        f"{human(rep['unique'][k]['bytes']):>{wk}}" for k in kinds)
+        + f"  {human(rep['unique_bytes']):>{wk}}")
+
+    saved = rep["total_bytes"] - rep["unique_bytes"]
+    print(f"\n  'stored' is what you hold today; 'one copy' is what the same "
+          f"content\n  would occupy with no file in two places — a difference "
+          f"of {human(saved)}.")
+    print("  That difference is either waste to reclaim or redundancy to "
+          "keep.\n  Which one it is is a decision, not a measurement.")
+    if rep["unhashed_bytes"]:
+        print(f"\n  Note: {human(rep['unhashed_bytes'])} could not be matched "
+              f"across drives\n  (no hash stored), so 'one copy' counts it "
+              f"once per drive and is an OVER-estimate.\n  Re-index those "
+              f"drives with --full for an exact figure.")
+    for e in rep["errors"]:
+        print(f"  ! {e}", file=sys.stderr)
+
+
 def dedupe_readiness(db_labels: list[tuple[Path, str]],
                      min_size: int = 1024 * 1024) -> dict:
     """Explain why a cross-drive search would find nothing.
@@ -4958,6 +5127,15 @@ def main():
     pdrv.add_argument("--stale-days", type=int, default=180,
                       help="warn about drives not indexed for this long (default 180)")
 
+    pcomp = sub.add_parser(
+        "compose",
+        help="what each drive is made of, by content category")
+    pcomp.add_argument("dbs", nargs="*", type=Path,
+                       help="databases to include (default: every registered drive)")
+    pcomp.add_argument("--min-size", type=parse_size, default=0,
+                       help="ignore files below this (e.g. 1MB)")
+    pcomp.add_argument("--json", action="store_true", help="emit as JSON")
+
     pfind = sub.add_parser(
         "find", help="search every x-ray by name, size and date")
     pfind.add_argument("query", nargs="+",
@@ -5186,6 +5364,29 @@ def main():
                 print(f"    {tag:<16}  {', '.join(sorted(exts))}")
             if src == "built-in defaults":
                 print("\n  run `dx auto-tags --init` to create an editable copy")
+    elif args.cmd == "compose":
+        if args.dbs:
+            pairs = []
+            for db in args.dbs:
+                try:
+                    with contextlib.closing(open_db_readonly(db)) as _c:
+                        row = _c.execute(
+                            "SELECT label FROM drive LIMIT 1").fetchone()
+                    pairs.append((db, row[0] if row else db.stem))
+                except Exception:
+                    pairs.append((db, db.stem))
+        else:
+            pairs = [(e["db"], e["label"]) for e in registry_list()
+                     if e["exists"]]
+        if not pairs:
+            sys.exit("no indexed drives — run `dx index` first")
+
+        rep = drive_composition(pairs, min_size=args.min_size)
+        if args.json:
+            print(json.dumps(rep, indent=2, ensure_ascii=False))
+        else:
+            print_composition(rep)
+
     elif args.cmd == "drives":
         entries = registry_list()
         if not entries:
