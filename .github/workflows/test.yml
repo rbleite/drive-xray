@@ -62,7 +62,13 @@ jobs:
       matrix:
         # windows-latest included on purpose: it catches path-separator and
         # drive-letter bugs the macOS/Linux jobs can't see.
-        os: [ubuntu-latest, windows-latest]
+        #
+        # macos-14 is here for the tests that can only run on APFS. Clone
+        # detection reads a physical block offset through a macOS-only fcntl
+        # against a packed struct; on every other runner that test skips, so
+        # without this job the syscall itself was never exercised by CI --
+        # only the arithmetic around it, through a stub.
+        os: [ubuntu-latest, windows-latest, macos-14]
     steps:
       - uses: actions/checkout@v4
 
