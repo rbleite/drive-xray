@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import datetime
 import fnmatch
 import hashlib
@@ -196,6 +197,30 @@ def finalize_staged(staged: Path, db: Path) -> str:
             last_err = str(e)
             time.sleep(2 * (attempt + 1))
     return f"could not move back ({last_err}) — db kept at {staged}"
+
+
+@contextlib.contextmanager
+def staged_db(db: Path):
+    """Run a write against a local copy, then move the finished file back.
+
+    Yields the path to write to. Outside a cloud-synced folder it yields `db`
+    unchanged and does nothing, so it is safe to wrap every writer.
+
+    It is also safe to NEST: the inner call sees a path inside STAGING_DIR,
+    which is not a cloud folder, so it becomes a no-op. That is what lets the
+    app stage before spawning a subprocess while the subprocess also stages
+    internally, without two copies fighting over the same file.
+
+    There is deliberately no try/finally. On an exception the staged copy is
+    left where it is and the cloud db is not touched: an interrupted index can
+    resume from the staged file next time, and a half-written database never
+    reaches the folder other machines sync from. Adding `finally` here would
+    publish exactly the corrupt state this exists to prevent.
+    """
+    target, staged = stage_for_write(Path(db))
+    yield target
+    if staged:
+        finalize_staged(target, Path(db))
 
 
 # ---------------------------------------------------------------------------
@@ -1297,7 +1322,8 @@ def import_folder(folder: Path) -> list[dict]:
         db_file = db_file.resolve()
         already = db_file in existing
         try:
-            conn = open_db(db_file)
+            # read-only: importing must not rewrite every db in the folder
+            conn = open_db_readonly(db_file)
             row = conn.execute(
                 "SELECT label, root_path FROM drive LIMIT 1"
             ).fetchone()
@@ -1460,6 +1486,23 @@ def _migrate_windows_seps(conn: sqlite3.Connection) -> None:
                  " SET rel_path = REPLACE(rel_path, '\\', '/')"
                  " WHERE rel_path LIKE '%\\%'")
     conn.commit()
+
+
+def open_db_readonly(db_path: Path) -> sqlite3.Connection:
+    """Open a db without migrating it.
+
+    open_db() runs every migration and then executescript(SCHEMA) — it is a
+    WRITE, even when the caller only wants to read one column. That matters
+    for a db inside a cloud-synced folder: peeking at a drive's label to build
+    a picker was enough to rewrite the file and trigger an upload, and
+    `dx import-folder` on a synced folder did it to every db at once.
+
+    Every caller of this only needs `drive.label` / `drive.root_path`, which
+    have existed in the `drive` table since v1, so no migration is required to
+    read them. Raises sqlite3.OperationalError if the file does not exist —
+    mode=ro will not create one, which is the point.
+    """
+    return sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True)
 
 
 def open_db(db_path: Path) -> sqlite3.Connection:
@@ -1796,6 +1839,19 @@ def index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
                 one_fs: bool = False, skip_cloud: bool = False,
                 reuse_old: dict | None = None,
                 mode: str = "fresh", target_snapshot_id: int | None = None) -> None:
+    """Index `root` into `db_path`, writing to a local copy first when the db
+    lives in a cloud-synced folder. See staged_db()."""
+    with staged_db(db_path) as _target:
+        _index_drive(root, _target, label, do_full, one_fs=one_fs,
+                     skip_cloud=skip_cloud, reuse_old=reuse_old, mode=mode,
+                     target_snapshot_id=target_snapshot_id)
+
+
+def _index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
+                 one_fs: bool = False, skip_cloud: bool = False,
+                 reuse_old: dict | None = None,
+                 mode: str = "fresh",
+                 target_snapshot_id: int | None = None) -> None:
     """Index `root` into `db_path`.
 
     mode:
@@ -2365,6 +2421,15 @@ def human(n: int) -> str:
 
 def dedupe(db_path: Path, min_size: int, mode: str,
            workers: int | None = None) -> None:
+    """Confirm duplicate candidates by full hash — the longest write in the
+    tool, since it reads every candidate end to end. Staged, so a cloud folder
+    sees one upload at the end rather than continuous churn throughout."""
+    with staged_db(db_path) as _target:
+        _dedupe(_target, min_size, mode, workers=workers)
+
+
+def _dedupe(db_path: Path, min_size: int, mode: str,
+            workers: int | None = None) -> None:
     conn = open_db(db_path)
     drive = conn.execute("SELECT root_path, label FROM drive LIMIT 1").fetchone()
     if not drive:
@@ -2482,7 +2547,15 @@ def _read_drive_and_cache(db_path: Path) -> tuple[Path, str, bool, bool, dict, i
 def refresh_drive(db_path: Path, do_full: bool = False) -> None:
     """Re-walk the original root and overwrite the latest snapshot in place.
     Reuses partial/full hashes for files unchanged by (size, mtime).
-    Historical snapshots are preserved untouched."""
+    Historical snapshots are preserved untouched.
+
+    Staged: the inner index_drive() stages too, but by then the path already
+    points inside STAGING_DIR, so that one is a no-op."""
+    with staged_db(db_path) as _target:
+        _refresh_drive(_target, do_full=do_full)
+
+
+def _refresh_drive(db_path: Path, do_full: bool = False) -> None:
     root, label, one_fs, skip_cloud, old, sid = _read_drive_and_cache(db_path)
     print(f"  refresh: reusing {len(old)} cached entries from snapshot {sid}",
           file=sys.stderr)
@@ -2497,6 +2570,20 @@ def refresh_drive(db_path: Path, do_full: bool = False) -> None:
 def snapshot_drive(db_path: Path, do_full: bool = False,
                    auto_prune: bool = True,
                    keep_last: int = 10, keep_monthly: int = 12) -> int:
+    """Take a snapshot, writing locally first when the db is in a cloud folder.
+
+    A snapshot both appends a whole new set of rows and (with auto_prune)
+    deletes old ones, so it is one of the heaviest writes here — and the one
+    most likely to be running unattended while a sync client watches. See
+    staged_db()."""
+    with staged_db(db_path) as _target:
+        return _snapshot_drive(_target, do_full=do_full, auto_prune=auto_prune,
+                               keep_last=keep_last, keep_monthly=keep_monthly)
+
+
+def _snapshot_drive(db_path: Path, do_full: bool = False,
+                    auto_prune: bool = True,
+                    keep_last: int = 10, keep_monthly: int = 12) -> int:
     """Re-walk the original root and create a *new* snapshot (preserving
     previous ones). Reuses hashes from the latest snapshot for files
     unchanged by (size, mtime). Returns the new snapshot id.
@@ -3330,6 +3417,16 @@ def _ps_quote(s: str) -> str:
 # ---------- compact ----------
 
 def compact_db(db_path: Path) -> None:
+    """VACUUM + WAL checkpoint to physically shrink the .db file.
+
+    Staged. A VACUUM rewrites the entire database, so run against a cloud
+    folder it is the worst case of all: every byte changes, and the sync
+    client uploads the whole file while the rewrite is still in progress."""
+    with staged_db(db_path) as _target:
+        _compact_db(_target)
+
+
+def _compact_db(db_path: Path) -> None:
     """VACUUM + WAL checkpoint to physically shrink the .db file. Also runs
     the v2→v3 migration via open_db if it hasn't happened yet."""
     before = db_path.stat().st_size if db_path.exists() else 0
@@ -3947,12 +4044,22 @@ def dedupe_readiness(db_labels: list[tuple[Path, str]],
                 "has_snapshot": False, "hash_version": None,
                 "files": 0, "eligible": 0, "comparable": 0,
                 "db_label": None, "root": None, "error": None}
+        # Read-only first. This runs for EVERY registered drive each time the
+        # cross-dedupe panel is opened, so using open_db() here meant merely
+        # looking at the panel rewrote every db in the user's synced folder.
+        # Fall back to open_db for a database still on an older schema, where
+        # the tables this reads do not exist yet and migrating is the only way
+        # to answer at all.
         try:
-            conn = open_db(Path(db_path))
-        except Exception as exc:
-            info["error"] = str(exc)[:200]
-            per_drive.append(info)
-            continue
+            conn = open_db_readonly(Path(db_path))
+            conn.execute("SELECT 1 FROM entries_core LIMIT 1")
+        except Exception:
+            try:
+                conn = open_db(Path(db_path))
+            except Exception as exc:
+                info["error"] = str(exc)[:200]
+                per_drive.append(info)
+                continue
         try:
             info["readable"] = True
             sid = latest_snapshot_id(conn)
@@ -4819,9 +4926,9 @@ def main():
         print(f"refreshing {args.db}", file=sys.stderr)
         refresh_drive(args.db, do_full=args.full)
         # update last_indexed in registry (read label/root from db)
-        _drv = open_db(args.db).execute(
-            "SELECT label, root_path FROM drive LIMIT 1"
-        ).fetchone()
+        with contextlib.closing(open_db_readonly(args.db)) as _c:
+            _drv = _c.execute(
+                "SELECT label, root_path FROM drive LIMIT 1").fetchone()
         if _drv:
             registry_register(args.db, _drv[0], Path(_drv[1]))
     elif args.cmd == "snapshot":
@@ -4848,11 +4955,14 @@ def main():
                                   keep_monthly=args.keep_monthly)
             print(f"  new snapshot id: {sid}", file=sys.stderr)
     elif args.cmd == "prune":
-        conn = open_db(args.db)
-        pruned = prune_snapshots(conn, keep_last=args.keep_last,
-                                 keep_monthly=args.keep_monthly)
-        conn.commit()
-        conn.close()
+        # deletes whole snapshots — a large write, and the only CLI writer
+        # that was still going straight into the cloud folder
+        with staged_db(args.db) as _target:
+            conn = open_db(_target)
+            pruned = prune_snapshots(conn, keep_last=args.keep_last,
+                                     keep_monthly=args.keep_monthly)
+            conn.commit()
+            conn.close()
         if pruned:
             print(f"  pruned {len(pruned)} snapshot(s): {pruned}")
         else:
@@ -4950,7 +5060,7 @@ def main():
             db_labels = []
             for db in args.dbs:
                 try:
-                    conn = open_db(db)
+                    conn = open_db_readonly(db)
                     row = conn.execute("SELECT label FROM drive LIMIT 1").fetchone()
                     conn.close()
                     db_labels.append((db, row[0] if row else db.stem))
@@ -4993,7 +5103,7 @@ def main():
             db_labels = []
             for db in args.dbs:
                 try:
-                    conn = open_db(db)
+                    conn = open_db_readonly(db)
                     row = conn.execute(
                         "SELECT label FROM drive LIMIT 1"
                     ).fetchone()
@@ -5038,7 +5148,7 @@ def main():
             db_labels = []
             for db in args.dbs:
                 try:
-                    conn = open_db(db)
+                    conn = open_db_readonly(db)
                     row = conn.execute(
                         "SELECT label FROM drive LIMIT 1"
                     ).fetchone()
