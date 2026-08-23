@@ -261,6 +261,7 @@ def t(key: str, **fmt) -> str:
 from drive_xray import STAGING_DIR as _STAGING_DIR
 from drive_xray import finalize_staged as _finalize_staged
 from drive_xray import stage_for_write as _stage_for_write
+from drive_xray import staged_db as _staged_db
 
 
 def _log_path(db: Path) -> Path:
@@ -1686,23 +1687,30 @@ with tab_dupes:
                 if st.button(t("confirm_btn"), key="confirm_full_hash_btn"):
                     st.session_state.pop(_dupes_key, None)
                     with st.status(t("calculating"), expanded=True) as _status:
-                        if DX_IS_RUST:
-                            st.write(t("confirming_candidates"))
-                            _proc = subprocess.run(
-                                [*DX_CMD, "dedupe", str(selected_db),
-                                 "--min-size", str(min_size)],
-                                capture_output=True, text=True,
-                            )
-                            for line in _proc.stderr.splitlines():
-                                if line.strip():
-                                    st.write(line)
-                        else:
-                            conn = open_db(selected_db)
-                            n = fill_full_hashes(conn, root_path, min_size)
-                            st.write(t("files_hashed", n=n))
-                            st.write(t("computing_merkle"))
-                            compute_dir_hashes(conn)
-                            conn.close()
+                        # Confirming duplicates reads and fully hashes every
+                        # candidate, writing the whole time — the longest
+                        # write in the app. It was the one operation still
+                        # going straight into the cloud folder, on BOTH
+                        # engines, while index/refresh/snapshot/compact were
+                        # all staged.
+                        with _staged_db(selected_db) as _wdb:
+                            if DX_IS_RUST:
+                                st.write(t("confirming_candidates"))
+                                _proc = subprocess.run(
+                                    [*DX_CMD, "dedupe", str(_wdb),
+                                     "--min-size", str(min_size)],
+                                    capture_output=True, text=True,
+                                )
+                                for line in _proc.stderr.splitlines():
+                                    if line.strip():
+                                        st.write(line)
+                            else:
+                                conn = open_db(_wdb)
+                                n = fill_full_hashes(conn, root_path, min_size)
+                                st.write(t("files_hashed", n=n))
+                                st.write(t("computing_merkle"))
+                                compute_dir_hashes(conn)
+                                conn.close()
                         _status.update(label=t("done"), state="complete")
                     st.rerun()
 
