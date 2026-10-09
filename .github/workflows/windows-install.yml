@@ -1,0 +1,143 @@
+name: windows install
+
+# Runs the README's Windows one-liner, literally, on a real Windows machine.
+#
+# Until this job existed the installer had never been executed the way users
+# execute it. install.ps1 was "validated" by parsing the file from disk -- and
+# reading a file from disk strips its UTF-8 BOM, while `irm` does not. The BOM
+# reached the parser as U+FEFF, turned the first comment line into a command
+# named "#", and demoted the param block to an unknown command "param". The
+# one-liner in the README had failed on line 1 since the day it was written,
+# and nothing that ran on every push could have noticed.
+#
+# So this reproduces the user's conditions as closely as a runner allows:
+#
+#   * Windows PowerShell 5.1 (`shell: powershell`), not pwsh -- it is what
+#     "Start menu -> type powershell" opens, and it differs from 7.x in exactly
+#     the ways that bite installers (native stderr handling, TLS defaults,
+#     web cmdlet decoding).
+#   * Execution policy forced to Restricted, the Windows client default. The
+#     runner image ships something laxer, which would hide any step that runs
+#     a .ps1 file from disk. The effective policy is asserted, so the test
+#     cannot silently become meaningless if a policy above Process wins.
+#   * `irm <raw url> | iex`, character for character the README command,
+#     pinned to the commit under test rather than to main.
+#
+# What it does NOT cover: installing Python and git from nothing. The runner
+# image already has both, so those branches of install.ps1 do not execute
+# here. That bootstrap still needs a clean machine to verify.
+#
+# Note also that install.ps1 clones the apps from their default branches, so
+# setup_shortcuts.ps1 and the launchers come from main, not from this commit.
+
+on:
+  pull_request:
+    paths:
+      - install.ps1
+      - install.bat
+      - setup_shortcuts.ps1
+      - start.bat
+      - requirements.txt
+      - .github/workflows/windows-install.yml
+  push:
+    branches: [main]
+    paths:
+      - install.ps1
+      - install.bat
+      - setup_shortcuts.ps1
+      - start.bat
+      - requirements.txt
+      - .github/workflows/windows-install.yml
+  schedule:
+    # Weekly: the installer depends on python.org, PyPI, winget and the
+    # GitHub API, all of which change without a push here to notice.
+    - cron: '0 6 * * 1'
+  workflow_dispatch: {}
+
+jobs:
+  one-liner:
+    name: README one-liner (PowerShell 5.1, Restricted policy)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      INSTALL_URL: https://raw.githubusercontent.com/${{ github.event.pull_request.head.repo.full_name || github.repository }}/${{ github.event.pull_request.head.sha || github.sha }}/install.ps1
+    steps:
+      - name: what this machine looks like
+        shell: powershell
+        run: |
+          "PowerShell : $($PSVersionTable.PSVersion)"
+          "Edition    : $($PSVersionTable.PSEdition)"
+          Get-ExecutionPolicy -List | Format-Table -AutoSize | Out-String
+          "python     : $((Get-Command python -ErrorAction SilentlyContinue).Source)"
+          "git        : $((Get-Command git -ErrorAction SilentlyContinue).Source)"
+          "url        : $env:INSTALL_URL"
+
+      - name: first install, exactly as the README says
+        shell: powershell
+        run: |
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Restricted -Force
+          $effective = Get-ExecutionPolicy
+          if ($effective -ne "Restricted") {
+            throw "effective policy is $effective, not Restricted -- this test would prove nothing"
+          }
+          irm $env:INSTALL_URL | iex
+
+      - name: everything the installer promises is there
+        shell: powershell
+        run: |
+          $root = Join-Path $env:USERPROFILE "tools"
+          $must = @(
+            "drive-xray\.venv\Scripts\streamlit.exe",
+            "media-catalog\.venv\Scripts\streamlit.exe",
+            "drive-xray\dx.exe"
+          )
+          foreach ($m in $must) {
+            $p = Join-Path $root $m
+            if (-not (Test-Path $p)) { throw "missing after install: $p" }
+            "ok  $p"
+          }
+          $desk = [Environment]::GetFolderPath("Desktop")
+          foreach ($l in @("drive-xray.lnk", "media-catalog.lnk")) {
+            $p = Join-Path $desk $l
+            if (-not (Test-Path $p)) { throw "no desktop button: $p" }
+            "ok  $p"
+          }
+          & (Join-Path $root "drive-xray\dx.exe") --version
+          if ($LASTEXITCODE -ne 0) { throw "dx.exe does not run" }
+
+          # the Python engine and its dependencies, end to end
+          $py = Join-Path $root "drive-xray\.venv\Scripts\python.exe"
+          $dx = Join-Path $root "drive-xray\drive_xray.py"
+          $data = Join-Path $env:RUNNER_TEMP "smoke"
+          New-Item -ItemType Directory -Force -Path $data | Out-Null
+          Set-Content -Path (Join-Path $data "a.txt") -Value "hello"
+          & $py $dx index $data --db (Join-Path $env:RUNNER_TEMP "smoke.db") --label smoke
+          if ($LASTEXITCODE -ne 0) { throw "the Python engine could not index a folder" }
+
+      - name: re-running updates, as the README promises
+        shell: powershell
+        run: |
+          # Make the checkout genuinely behind, so the update has to FETCH.
+          # "Already up to date" would never exercise the path that breaks:
+          # git writes "From https://..." to stderr when it fetches, and
+          # Windows PowerShell 5.1 turns redirected native stderr into
+          # terminating errors under $ErrorActionPreference = "Stop".
+          #
+          # `iex` runs in THIS scope, so every variable the installer assigns
+          # lands here -- its `foreach ($repo in $REPOS)` overwrote a $repo of
+          # ours with a hashtable once already. Use a name it does not touch,
+          # and re-derive the path afterwards rather than trust any variable.
+          $xrayCheckout = Join-Path $env:USERPROFILE "tools\drive-xray"
+          git -C $xrayCheckout reset -q --hard HEAD~1
+          git -C $xrayCheckout update-ref -d refs/remotes/origin/main
+          $before = git -C $xrayCheckout rev-parse HEAD
+
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Restricted -Force
+          irm $env:INSTALL_URL | iex
+
+          $xrayCheckout = Join-Path $env:USERPROFILE "tools\drive-xray"
+          $after = git -C $xrayCheckout rev-parse HEAD
+          $remote = git -C $xrayCheckout rev-parse origin/main
+          if ($after -eq $before) { throw "re-running the installer did not update the checkout" }
+          if ($after -ne $remote) { throw "checkout is at $after, origin/main is $remote" }
+          "updated $before -> $after"
