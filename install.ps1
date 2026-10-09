@@ -1,4 +1,4 @@
-﻿# install.ps1 -- one-step setup for drive-xray + media-catalog on Windows.
+# install.ps1 -- one-step setup for drive-xray + media-catalog on Windows.
 #
 # Written for someone starting from a clean machine with NOTHING installed:
 # no Python, no git. It installs what is missing, fetches both apps, sets up
@@ -51,6 +51,31 @@ function Write-Ok   { param($m) Write-Host "    OK: $m" -ForegroundColor Green }
 function Write-Warn { param($m) Write-Host "    !! $m" -ForegroundColor Yellow }
 
 
+function Invoke-Native {
+    # Run an external program quietly and return its exit code.
+    #
+    # Windows PowerShell 5.1 -- what "type powershell" opens -- wraps every
+    # line a native program writes to stderr in an ErrorRecord as soon as
+    # stderr is redirected, and under $ErrorActionPreference = "Stop" the first
+    # one aborts the whole script. Plenty of programs write ordinary progress
+    # there: `git pull` prints "From https://..." whenever it fetches, so
+    # re-running this script to update died with NativeCommandError the first
+    # time there was anything to update. PowerShell 7.2+ no longer does this,
+    # which is why it never showed up outside 5.1.
+    #
+    # The exit code is what actually means failure, so judge by that.
+    param([scriptblock]$Command)
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Command 2>&1 | Out-Null
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $saved
+    }
+}
+
+
 function Update-SessionPath {
     # winget and the .exe installers update the registry, not this process.
     # Without this refresh, a tool installed above is still "missing" below.
@@ -99,9 +124,11 @@ function Install-ViaWinget {
     Write-Host "    installing $Label via winget..."
     # --scope user avoids the UAC prompt; some packages ignore it and fall back
     # to machine scope, which is fine when the shell is already elevated.
-    & winget install --id $Id -e --source winget `
-        --accept-package-agreements --accept-source-agreements `
-        --disable-interactivity --scope user 2>&1 | Out-Null
+    $null = Invoke-Native {
+        & winget install --id $Id -e --source winget `
+            --accept-package-agreements --accept-source-agreements `
+            --disable-interactivity --scope user
+    }
     Update-SessionPath
     return $true
 }
@@ -166,8 +193,8 @@ function Sync-Repo {
         Write-Host "    updating $Name..."
         # A local edit must never be silently discarded, so this only
         # fast-forwards; anything else is reported and left for the user.
-        & git -C $Dest pull --ff-only 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
+        $code = Invoke-Native { & git -C $Dest pull --ff-only }
+        if ($code -ne 0) {
             Write-Warn "$Name has local changes or a diverged branch -- left untouched."
         } else {
             Write-Ok "$Name up to date"
@@ -192,7 +219,7 @@ function Initialize-Venv {
     $req = Join-Path $Root "requirements.txt"
     if (Test-Path $req) {
         Write-Host "    installing $Name dependencies..."
-        & $venvPy -m pip install --quiet --upgrade pip 2>&1 | Out-Null
+        $null = Invoke-Native { & $venvPy -m pip install --quiet --upgrade pip }
         & $venvPy -m pip install --quiet -r $req
         if ($LASTEXITCODE -ne 0) { throw "Could not install dependencies for $Name" }
     }
@@ -278,10 +305,26 @@ if (-not $SkipShortcuts) {
     Write-Step "Creating desktop buttons"
     $shortcuts = Join-Path $dxRoot "setup_shortcuts.ps1"
     if (Test-Path $shortcuts) {
+        # In a child PowerShell with -ExecutionPolicy Bypass, never `& $shortcuts`.
+        #
+        # The README runs this script as `irm ... | iex`. iex evaluates a
+        # string, which the execution policy does not govern -- but calling a
+        # .ps1 FILE does, and the Windows client default is Restricted. So the
+        # one-liner installed everything and then died at the very last step,
+        # "running scripts is disabled on this system", before printing Done.
+        # -ExecutionPolicy on a child process scopes the bypass to that one
+        # process and changes nothing on the machine.
+        # Same PowerShell that is running us (5.1 or 7), not whatever is on PATH.
+        $psExe = (Get-Process -Id $PID).Path
         # NB: not $args -- that is an automatic variable in PowerShell
-        $scArgs = @{ MediaCatalog = (Join-Path $Path "media-catalog") }
-        if ($Startup) { $scArgs["Startup"] = $true }
-        & $shortcuts @scArgs
+        $scArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $shortcuts,
+                    "-MediaCatalog", (Join-Path $Path "media-catalog"))
+        if ($Startup) { $scArgs += "-Startup" }
+        & $psExe @scArgs
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "could not create the desktop buttons (exit $LASTEXITCODE)."
+            Write-Warn "The apps are installed; start them with start.bat inside each folder."
+        }
     } else {
         Write-Warn "setup_shortcuts.ps1 not found -- skipping"
     }
