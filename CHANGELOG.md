@@ -7,7 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-10-09
+
+### Added
+- **`dx compose` — what each drive is actually made of**, by content category.
+  The report you need before reorganising drives by content: how many GB of
+  photos, video, games, genomics you hold, where they are now, and how much
+  they would occupy if each thing existed in exactly one place.
+
+  Two totals, and the difference between them is the point. `stored` is what
+  you hold today; `one copy` counts a file present on several drives once.
+  The gap is either waste to reclaim *or* redundancy you would be giving up —
+  a decision, not a measurement, and the output says so rather than calling it
+  "wasted". Getting that backwards is how someone tidies away their only
+  backup.
+
+  Categories come from the auto-tag rules, so one added to `auto_tags.yaml`
+  appears with no code change. Anything no rule matches goes to `outros`
+  rather than being dropped: a report that silently omits what it cannot
+  classify understates the drive and gives the reader no way to notice.
+
+  Runs entirely off the indexes — nothing needs to be plugged in, which is the
+  whole point when the disks are in a drawer and you are planning.
+
 ### Fixed
+- **Publishing a staged database replaced the file, and writes went nowhere.**
+  `finalize_staged` used `shutil.move`, which gives the destination a new
+  inode, leaving any connection another process held on the old, unlinked
+  file. In media-catalog that raised `attempt to write a readonly database`;
+  here it was quieter and worse — the write *succeeded*, against a file
+  nothing could ever read again. Verified before fixing: a table created
+  through such a connection committed cleanly and was absent from disk.
+
+  Publishing now goes through `Connection.backup()`, which copies into the
+  existing file so it keeps its identity and SQLite's own locking decides when
+  it is safe. A move is still used where there is no destination to preserve,
+  or where the destination is not a readable database.
+
+  A follow-up, caught by Windows CI: the staged copy was being unlinked and
+  moved while sqlite3 still had it open. POSIX allows that; Windows refuses
+  with `WinError 32`, so the copy was left behind and the corrupt-destination
+  path silently did nothing. All filesystem work now happens after the handles
+  are closed.
+
+- **Every write now goes to a local copy first, and reads stopped writing.**
+  Staging existed, but only around the four subprocesses the app spawns. The
+  entire CLI, `prune`, and duplicate confirmation on *both* engines wrote
+  straight into the synced folder. Staging moved inside the writer functions
+  themselves, so a writer cannot be forgotten.
+
+  Reads were writes too: `open_db()` runs every migration and then
+  `executescript(SCHEMA)`, so peeking at a drive's label to build a picker
+  opened the file for writing. `dx import-folder` did it to every database in
+  a folder at once, and opening the cross-dedupe panel did it to every
+  registered drive, every time. Added `open_db_readonly()` for those peeks.
+
+- **`*.mkv > 1GB` silently searched for a file named `>`.** The term splitter
+  cuts on whitespace, so the operator and its value fell through to the name
+  filter and the search reported zero results on a drive full of large files.
+  Only one of four reasonable spellings worked, and `modified >= 2024` was
+  worse than wrong — it applied 2024 as a *size*. Spacing is now repaired, and
+  an operator with nothing after it is an error rather than a name.
+
 - **The cleanup plan promised space that deleting could not free, on any APFS
   volume.** `cp -c`, Finder's Duplicate and several backup tools create clones:
   a second file with its own inode and its own path, sharing the original's
