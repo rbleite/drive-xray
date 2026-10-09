@@ -122,16 +122,22 @@ jobs:
           # git writes "From https://..." to stderr when it fetches, and
           # Windows PowerShell 5.1 turns redirected native stderr into
           # terminating errors under $ErrorActionPreference = "Stop".
-          $repo = Join-Path $env:USERPROFILE "tools\drive-xray"
-          git -C $repo reset -q --hard HEAD~1
-          git -C $repo update-ref -d refs/remotes/origin/main
-          $before = git -C $repo rev-parse HEAD
+          #
+          # `iex` runs in THIS scope, so every variable the installer assigns
+          # lands here -- its `foreach ($repo in $REPOS)` overwrote a $repo of
+          # ours with a hashtable once already. Use a name it does not touch,
+          # and re-derive the path afterwards rather than trust any variable.
+          $xrayCheckout = Join-Path $env:USERPROFILE "tools\drive-xray"
+          git -C $xrayCheckout reset -q --hard HEAD~1
+          git -C $xrayCheckout update-ref -d refs/remotes/origin/main
+          $before = git -C $xrayCheckout rev-parse HEAD
 
           Set-ExecutionPolicy -Scope Process -ExecutionPolicy Restricted -Force
           irm $env:INSTALL_URL | iex
 
-          $after = git -C $repo rev-parse HEAD
-          $remote = git -C $repo rev-parse origin/main
+          $xrayCheckout = Join-Path $env:USERPROFILE "tools\drive-xray"
+          $after = git -C $xrayCheckout rev-parse HEAD
+          $remote = git -C $xrayCheckout rev-parse origin/main
           if ($after -eq $before) { throw "re-running the installer did not update the checkout" }
           if ($after -ne $remote) { throw "checkout is at $after, origin/main is $remote" }
           "updated $before -> $after"
