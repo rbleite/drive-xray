@@ -110,8 +110,9 @@ pub fn index_drive(
     mode: Mode,
     target_snapshot_id: Option<i64>,
 ) -> Result<i64> {
-    let root_canon = root.canonicalize()
-        .with_context(|| format!("canonicalize {}", root.display()))?;
+    // canonicalize gives \\?\E:\ on Windows; see util::strip_verbatim
+    let root_canon = util::strip_verbatim_path(root.canonicalize()
+        .with_context(|| format!("canonicalize {}", root.display()))?);
 
     eprintln!(
         "indexing {} → {}{}",

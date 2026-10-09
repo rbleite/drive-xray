@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Windows: the Rust engine stored drive roots as `\\?\E:\`** instead of
+  `E:\`. `canonicalize` returns Windows paths in that "verbatim" form and it
+  went straight into `drive.root_path`, so the app showed the prefix, the
+  Python engine (which stores `E:\`) disagreed about the same drive, and the
+  backslash-to-slash migration did not recognise these as Windows roots. The
+  prefix is now dropped when indexing, and indexes that already carry it are
+  repaired the next time either engine opens them. A `cargo test` on
+  windows-latest now checks what is stored.
+
 ## [1.6.0] — 2026-10-09
 
 ### Added

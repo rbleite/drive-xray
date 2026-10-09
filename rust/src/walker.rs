@@ -242,7 +242,7 @@ impl Exclusions {
 
 pub fn walk(root: &Path, one_fs: bool, skip_cloud: bool,
             exclude: &[String]) -> Result<WalkResult> {
-    let root = root.canonicalize()?;
+    let root = crate::util::strip_verbatim_path(root.canonicalize()?);
     let root_md = fs::symlink_metadata(&root)?;
     if !root_md.is_dir() {
         anyhow::bail!("not a directory: {}", root.display());

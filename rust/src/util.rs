@@ -50,9 +50,105 @@ pub fn parent_rel(rel: &str) -> &str {
     }
 }
 
+/// `\\?\E:\Films` → `E:\Films`; `\\?\UNC\srv\share` → `\\srv\share`.
+///
+/// `Path::canonicalize` returns Windows paths in this "verbatim" form, and it
+/// was stored as drive.root_path: shown in the app, different from the `E:\`
+/// the Python engine stores for the same drive, and not recognised as a
+/// Windows root by migrate_windows_seps. A verbatim path also opts out of
+/// Win32 path normalisation, which every `{root}/{rel}` built from it relied on.
+///
+/// Left unchanged whenever dropping the prefix could change what the path
+/// means: other verbatim forms (`\\?\Volume{…}`), anything over MAX_PATH, and
+/// names only reachable verbatim (reserved device names, a trailing dot or
+/// space). Plain paths pass through. String-based so it is testable on every
+/// OS. Mirrors `strip_verbatim` in drive_xray.py.
+pub fn strip_verbatim(p: &str) -> String {
+    let Some(rest) = p.strip_prefix(r"\\?\") else {
+        return p.to_string();
+    };
+    let b = rest.as_bytes();
+    let (out, tail): (String, Vec<&str>) =
+        if b.len() >= 4 && rest[..4].eq_ignore_ascii_case(r"UNC\") {
+            let unc: Vec<&str> = rest[4..].split('\\').collect();
+            if unc.len() < 2 || unc[0].is_empty() || unc[1].is_empty() {
+                return p.to_string(); // not \\server\share
+            }
+            (format!(r"\\{}", &rest[4..]), unc[2..].to_vec())
+        } else if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+            && (b.len() == 2 || b[2] == b'\\')
+        {
+            // "E:" alone means the current directory on E, not its root
+            let out = if b.len() == 2 { format!("{rest}\\") } else { rest.to_string() };
+            let tail = if b.len() > 3 { rest[3..].split('\\').collect() } else { vec![] };
+            (out, tail)
+        } else {
+            return p.to_string();
+        };
+    if out.encode_utf16().count() >= 260 || out.contains('/') {
+        return p.to_string();
+    }
+    const RESERVED: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+    for part in tail.iter().filter(|s| !s.is_empty()) {
+        if *part == "." || *part == ".." || part.ends_with('.') || part.ends_with(' ') {
+            return p.to_string();
+        }
+        let stem = part.split('.').next().unwrap_or("").trim_end_matches(' ')
+            .to_ascii_uppercase();
+        let numbered = stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9');
+        if RESERVED.contains(&stem.as_str()) || numbered {
+            return p.to_string();
+        }
+    }
+    out
+}
+
+/// `strip_verbatim` for a `Path`, as `canonicalize` hands it back.
+pub fn strip_verbatim_path(p: std::path::PathBuf) -> std::path::PathBuf {
+    match p.to_str() {
+        Some(s) if s.starts_with(r"\\?\") => std::path::PathBuf::from(strip_verbatim(s)),
+        _ => p,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_verbatim_cases() {
+        let cases = [
+            (r"\\?\E:\", r"E:\"),
+            (r"\\?\E:", r"E:\"),
+            (r"\\?\e:\Films\Old", r"e:\Films\Old"),
+            (r"\\?\UNC\nas\share", r"\\nas\share"),
+            (r"\\?\UNC\nas\share\x", r"\\nas\share\x"),
+            (r"\\?\unc\nas\share", r"\\nas\share"),
+            // left alone: the prefix is what makes these work
+            (r"\\?\UNC\nas", r"\\?\UNC\nas"),
+            (r"\\?\Volume{0b1e}\", r"\\?\Volume{0b1e}\"),
+            (r"\\?\E:\CON", r"\\?\E:\CON"),
+            (r"\\?\E:\lpt1.txt", r"\\?\E:\lpt1.txt"),
+            (r"\\?\E:\trailing.", r"\\?\E:\trailing."),
+            (r"\\?\E:\trailing ", r"\\?\E:\trailing "),
+            (r"\\?\E:\a/b", r"\\?\E:\a/b"),
+            // not verbatim at all
+            (r"E:\", r"E:\"),
+            ("/Volumes/X", "/Volumes/X"),
+            (r"\\nas\share", r"\\nas\share"),
+            ("", ""),
+        ];
+        for (inp, want) in cases {
+            assert_eq!(strip_verbatim(inp), want, "input {inp:?}");
+        }
+        let long = format!(r"\\?\E:\{}", "a".repeat(300));
+        assert_eq!(strip_verbatim(&long), long);
+        // COM0 and CONSOLE are ordinary names
+        assert_eq!(strip_verbatim(r"\\?\E:\COM0"), r"E:\COM0");
+        assert_eq!(strip_verbatim(r"\\?\E:\CONSOLE"), r"E:\CONSOLE");
+    }
 
     #[test]
     fn human_basics() {
