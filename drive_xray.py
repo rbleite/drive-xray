@@ -49,7 +49,7 @@ READ_CHUNK = 1024 * 1024
 # v1 = head + tail; v2 = head + middle + tail (defends against bio formats like
 # BAM/VCF where header/footer are stable but body varies).
 HASH_VERSION = 2
-DX_VERSION = "1.5.1"
+DX_VERSION = "1.6.0"
 
 # First dx release whose Rust engine understands SCHEMA_VERSION. The two move
 # independently -- Python migrates a .db the moment the app runs, while the
