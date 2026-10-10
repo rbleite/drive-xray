@@ -121,6 +121,7 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     // Apply the fresh-db schema (CREATE TABLE / INDEX IF NOT EXISTS).
     conn.execute_batch(SCHEMA_V5)?;
 
+    migrate_verbatim_root(&conn)?;
     migrate_windows_seps(&conn)?;
 
     // Backfill `drive` columns that may be missing on very old .db files.
@@ -749,6 +750,24 @@ pub fn get_hash_version(conn: &Connection) -> Result<i64> {
     Ok(v.unwrap_or(1))
 }
 
+/// Rewrite a `\\?\E:\` root recorded by dx < 1.6.1 on Windows as `E:\`.
+/// Runs before migrate_windows_seps, which only recognises a root that
+/// starts with a drive letter. Mirrors `_migrate_verbatim_root` in
+/// drive_xray.py.
+fn migrate_verbatim_root(conn: &Connection) -> Result<()> {
+    let root: String = match conn
+        .query_row("SELECT root_path FROM drive LIMIT 1", [], |r| r.get(0)) {
+        Ok(r) => r,
+        Err(_) => return Ok(()),
+    };
+    let fixed = crate::util::strip_verbatim(&root);
+    if fixed != root {
+        conn.execute("UPDATE drive SET root_path=?1 WHERE root_path=?2",
+                     rusqlite::params![fixed, root])?;
+    }
+    Ok(())
+}
+
 /// Older Python-on-Windows indexes stored rel_path with '\' while the Rust
 /// engine (and current Python) always store '/'. Normalize in place — but
 /// ONLY when the drive root is a Windows path (X:\...), where '\' cannot
@@ -969,6 +988,8 @@ pub fn resolve_root_with(
     stored_root: &str,
     candidates: Option<Vec<PathBuf>>,
 ) -> PathBuf {
+    // a db opened read-only never ran migrate_verbatim_root
+    let stored_root = &crate::util::strip_verbatim(stored_root);
     let root = PathBuf::from(stored_root);
     let (names, files) = root_fingerprint(conn);
     if root.is_dir() {

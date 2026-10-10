@@ -1529,6 +1529,67 @@ def _migrate_to_v7(conn: sqlite3.Connection) -> bool:
     return True
 
 
+_WIN_RESERVED = {"CON", "PRN", "AUX", "NUL",
+                 *(f"COM{i}" for i in range(1, 10)),
+                 *(f"LPT{i}" for i in range(1, 10))}
+
+
+def strip_verbatim(p: str) -> str:
+    """`\\\\?\\E:\\Films` → `E:\\Films`; `\\\\?\\UNC\\srv\\share` → `\\\\srv\\share`.
+
+    Rust's canonicalize returns Windows paths in this "verbatim" form, and dx
+    < 1.6.1 stored it as drive.root_path: shown in the app, different from
+    the `E:\\` this engine stores for the same drive, and not recognised as a
+    Windows root by _migrate_windows_seps. A verbatim path also opts out of
+    Win32 path normalisation, which every f"{root}/{rel}" built from it
+    relied on.
+
+    Left unchanged whenever dropping the prefix could change what the path
+    means: other verbatim forms (`\\\\?\\Volume{…}`), anything over MAX_PATH,
+    and names only reachable verbatim (reserved device names, a trailing dot
+    or space). Plain paths pass through untouched. Mirrors
+    util::strip_verbatim in the Rust engine."""
+    if not isinstance(p, str) or not p.startswith("\\\\?\\"):
+        return p
+    rest = p[4:]
+    if rest[:4].upper() == "UNC\\":
+        unc = rest[4:].split("\\")
+        if len(unc) < 2 or not unc[0] or not unc[1]:
+            return p                             # not \\server\share
+        out = "\\\\" + rest[4:]
+        tail = unc[2:]                           # below \\server\share
+    elif len(rest) >= 2 and rest[0].isascii() and rest[0].isalpha() \
+            and rest[1] == ":" and (len(rest) == 2 or rest[2] == "\\"):
+        out = rest if len(rest) > 2 else rest + "\\"   # "E:" alone = cwd on E
+        tail = rest[3:].split("\\")
+    else:
+        return p
+    if len(out.encode("utf-16-le")) // 2 >= 260 or "/" in out:
+        return p
+    for part in tail:
+        if not part:
+            continue
+        if part in (".", "..") or part[-1] in ". ":
+            return p
+        if part.split(".")[0].rstrip(" ").upper() in _WIN_RESERVED:
+            return p
+    return out
+
+
+def _migrate_verbatim_root(conn: sqlite3.Connection) -> None:
+    """Rewrite a `\\\\?\\E:\\` root recorded by dx < 1.6.1 on Windows as
+    `E:\\`. Runs before _migrate_windows_seps, which only recognises a root
+    that starts with a drive letter."""
+    row = conn.execute("SELECT root_path FROM drive LIMIT 1").fetchone()
+    if not row or not row[0]:
+        return
+    fixed = strip_verbatim(row[0])
+    if fixed != row[0]:
+        conn.execute("UPDATE drive SET root_path=? WHERE root_path=?",
+                     (fixed, row[0]))
+        conn.commit()
+
+
 def _migrate_windows_seps(conn: sqlite3.Connection) -> None:
     """Older Python-on-Windows indexes stored rel_path with '\\' while the
     Rust engine (and current Python) always store '/'. Normalize in place —
@@ -1586,6 +1647,7 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     # EXISTS entries` would be skipped while a table of that name still exists.
     _migrate_to_v7(conn)
     conn.executescript(SCHEMA)
+    _migrate_verbatim_root(conn)
     _migrate_windows_seps(conn)
     # in case `drive` was created without these (very old .db)
     drv_cols = {r[1] for r in conn.execute("PRAGMA table_info(drive)")}
@@ -1824,6 +1886,8 @@ def resolve_root(conn: sqlite3.Connection, stored_root,
     match anywhere, the stored path is returned unchanged — behaviour then
     degrades to exactly what it was before this feature existed.
     `candidates` overrides the scanned mount points (used by tests)."""
+    # a db opened read-only never ran _migrate_verbatim_root
+    stored_root = strip_verbatim(str(stored_root))
     root = Path(stored_root)
     names, files = _root_fingerprint(conn)
     try:
