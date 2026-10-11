@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.1] — 2026-10-10
+
 ### Fixed
+- **The Windows one-liner in the README never worked.** `install.ps1` began
+  with a UTF-8 BOM, which `irm | iex` hands to the parser as a character, so
+  the installer failed on its first line. Windows PowerShell 5.1 also turned
+  git's and pip's progress output into fatal errors, and the desktop shortcuts
+  were created by running a `.ps1` from disk, which the default execution
+  policy blocks. All three are fixed, and a new workflow runs the README
+  command, unchanged, on windows-latest under PowerShell 5.1 with the
+  Restricted policy: first install, then a re-run that has to update.
 - **Windows: the Rust engine stored drive roots as `\\?\E:\`** instead of
   `E:\`. `canonicalize` returns Windows paths in that "verbatim" form and it
   went straight into `drive.root_path`, so the app showed the prefix, the
