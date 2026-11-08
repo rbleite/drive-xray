@@ -44,14 +44,17 @@ Rather than remembering extensions, search by what a file *is*:
 ```bash
 dx find "kind:genomica"          # fastq, bam, vcf, bed, fasta …
 dx find "kind:jogos >4GB"        # iso, nsp, xci, wbfs …
+dx find "kind:email >100MB"      # Outlook .pst/.ost/.olm, Apple Mail .emlx/.mbox …
 dx find "kind:video kind:musica" # several kinds widen the search
 ```
 
 The categories are the **same ones that drive auto-tagging** — nanopore, NGS,
 variantes, genómica, imagiologia, PDF, documentos, tabelas, apresentações,
-música, vídeo, imagens, código, scripts, arquivo, base de dados, jogos — so
+email, música, vídeo, imagens, código, scripts, arquivo, base de dados, jogos — so
 anything you add to `~/.config/drive-xray/auto_tags.yaml` becomes searchable
-the moment you add it. There is no second list to maintain.
+the moment you add it. There is no second list to maintain. If you created
+that file before a category existed (`email` arrived after 1.6.1), it replaces
+the built-in list entirely, so add the new entry to it yourself.
 
 Accents are optional: `kind:genomica` finds `genómica`. An unknown kind lists
 the real ones instead of silently finding nothing. Compound extensions are

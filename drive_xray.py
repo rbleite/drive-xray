@@ -327,6 +327,15 @@ DEFAULT_AUTO_TAG_RULES: list[tuple[frozenset, str]] = [
         "tabelas"),
     (frozenset({"pptx", "ppt", "odp", "key"}),
         "apresentações"),
+    # Email: Outlook (pst/ost on Windows, olm export and olk*message on Mac,
+    # msg single messages), Apple Mail (emlx per message, mbox export),
+    # generic eml/mbx, Outlook Express dbx. Apple Mail's .mbox is usually a
+    # folder: `kind:email` finds it by its name, but the composition report
+    # counts files, so an exported .mbox whose data file is a bare "mbox"
+    # (no extension) is not counted there.
+    (frozenset({"pst", "ost", "olm", "msg", "olk14message", "olk15message",
+                "emlx", "eml", "mbox", "mbx", "dbx"}),
+        "email"),
     # Media
     (frozenset({"mp3", "flac", "wav", "ogg", "aac", "m4a",
                 "opus", "wma", "alac", "aiff"}),

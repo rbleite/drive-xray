@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **An `email` category** for saved mail: Outlook (`.pst`, `.ost`, `.olm`,
+  `.msg`, `.olk14Message`/`.olk15Message`), Apple Mail (`.emlx`, `.mbox`) and
+  generic `.eml`/`.mbx`/`.dbx`. `dx find "kind:email"` finds them all in one
+  search (an Apple Mail `.mbox` folder included, by its name), and `dx
+  compose` gives email its own line. If you keep your own
+  `~/.config/drive-xray/auto_tags.yaml`, it replaces the built-in rules, so
+  add `email` there yourself.
+
 ## [1.6.1] — 2026-10-10
 
 ### Fixed

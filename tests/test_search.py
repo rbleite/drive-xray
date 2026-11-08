@@ -375,3 +375,65 @@ def test_spacing_does_not_disturb_the_other_fields():
     assert f["is_dir"] == 0
     assert f["names"] == ["*.mkv"]
     assert f["size_min"] == 20 * 1024 ** 3 + 1
+
+
+# ── email ────────────────────────────────────────────────────────────────────
+
+@pytest.fixture()
+def mail_drive(tmp_path):
+    """Saved mail in the forms Outlook and Apple Mail leave behind."""
+    root = tmp_path / "drive"
+    files = {
+        "Outlook/arquivo 2015.pst": 4096,
+        "Outlook/cache.ost": 4096,
+        "Outlook Mac/export.olm": 4096,
+        "Outlook 15 Profiles/Data/Messages/x.olk15Message": 100,
+        "Mail/V10/INBOX.mbox/Messages/123.emlx": 100,
+        "Mail/V10/INBOX.mbox/Messages/124.partial.emlx": 100,
+        "Takeout/All mail Including Spam and Trash.mbox": 4096,
+        "soltos/recibo.eml": 100,
+        "soltos/reuniao.MSG": 100,
+        "soltos/notas.txt": 100,
+    }
+    for rel, size in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x" * size)
+    db = tmp_path / "m.db"
+    assert dx_py("index", str(root), "--db", str(db), "--label", "Mail"
+                 ).returncode == 0
+    return [(db, "Mail")]
+
+
+def test_email_is_a_kind():
+    from drive_xray import known_kinds
+    assert "email" in known_kinds()
+
+
+def test_kind_email_finds_outlook_and_apple_mail(mail_drive):
+    res = search_drives(mail_drive, "kind:email", check_mounted=False)
+    names = sorted(Path(h["path"]).name for h in res["hits"])
+    assert names == sorted([
+        "arquivo 2015.pst", "cache.ost", "export.olm", "x.olk15Message",
+        "123.emlx", "124.partial.emlx",
+        "All mail Including Spam and Trash.mbox",
+        "recibo.eml", "reuniao.MSG",
+        # the Apple Mail mailbox FOLDER, matched by its name -- the useful
+        # hit, since it holds thousands of .emlx
+        "INBOX.mbox",
+    ]), names
+
+
+def test_kind_email_combines_with_size(mail_drive):
+    """The everyday question: where are the big Outlook archives?"""
+    res = search_drives(mail_drive, "kind:email >1KB", check_mounted=False)
+    names = sorted(Path(h["path"]).name for h in res["hits"])
+    assert names == sorted(["arquivo 2015.pst", "cache.ost", "export.olm",
+                            "All mail Including Spam and Trash.mbox"]), names
+
+
+def test_email_has_its_own_line_in_the_composition(mail_drive):
+    from drive_xray import drive_composition
+    rep = drive_composition(mail_drive)
+    by_kind = rep["drives"][0]["by_kind"]
+    assert by_kind["email"]["bytes"] == 4 * 4096 + 5 * 100
