@@ -7,7 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.3] — 2026-11-08
+
 ### Fixed
+- **Folders the indexer could not open vanished without a word.** On macOS,
+  `~/Library/Mail` needs Full Disk Access, so a Mac's own mailbox was missing
+  from its index and `kind:email` found nothing there. Both engines now end
+  the run with a warning naming those folders and, on macOS, how to grant
+  Full Disk Access. (Their contents are still not indexed -- the system will
+  not let any program read them -- but now you are told.)
+- **The `email` category missed several Mac mail files:** Outlook for Mac's
+  `.olk14MsgSource`/`.olk15MsgSource` (the full message) and
+  `.olk14MsgAttach`/`.olk15MsgAttach` (attachments), Apple Mail's `.emlxpart`,
+  Thunderbird's `.msf` index, plus `.nst` (Outlook) and `.nsf` (Lotus Notes).
+  Thunderbird's mailboxes themselves have no extension and can only be found
+  by path.
 - **`kind: email` (with a space) failed** with `unknown kind ''`: the space
   split the field from its value. `kind: email`, `kind :email` and
   `kind : email` now mean `kind:email`, for every search field.

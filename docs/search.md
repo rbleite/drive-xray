@@ -48,6 +48,16 @@ dx find "kind:email >100MB"      # Outlook .pst/.ost/.olm, Apple Mail .emlx/.mbo
 dx find "kind:video kind:musica" # several kinds widen the search
 ```
 
+Not every mailbox has an extension. Thunderbird keeps each folder as a file
+named just `Inbox`, `Sent` …, and an Apple Mail export keeps its messages in a
+file named `mbox` inside the `.mbox` folder. Find those by where they live:
+
+```bash
+dx find "path:Library/Mail"                          # Apple Mail
+dx find "path:Thunderbird/Profiles"                  # Thunderbird
+dx find "path:\"Outlook 15 Profiles\""                # Outlook for Mac
+```
+
 The categories are the **same ones that drive auto-tagging** — nanopore, NGS,
 variantes, genómica, imagiologia, PDF, documentos, tabelas, apresentações,
 email, música, vídeo, imagens, código, scripts, arquivo, base de dados, jogos — so

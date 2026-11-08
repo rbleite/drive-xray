@@ -161,6 +161,9 @@ pub fn index_drive(
     eprintln!("  walk: {} entries in {:.1}s (firmlinks_skipped={}, crossed={}, cloud_skipped={}, excluded={})",
         n_walked, t0.elapsed().as_secs_f64(),
         stats.firmlinks_skipped, stats.crossed, stats.cloud_skipped, stats.excluded);
+    if !stats.unreadable.is_empty() {
+        eprintln!("{}", unreadable_warning(&stats.unreadable, cfg!(target_os = "macos")));
+    }
 
     // -------- phase 2: write the file tree FIRST (no hashes yet) --------
     // Persisting the structure right after the walk means a long scan
@@ -473,6 +476,27 @@ pub fn snapshot_drive(db_path: &Path, do_full: bool) -> Result<i64> {
     );
     index_drive(&root, db_path, label.as_deref(), do_full,
                 one_fs, skip_cloud, Some(reuse), Mode::Snapshot, None)
+}
+
+/// The note printed when the walk could not open some folders. Mirrors
+/// `unreadable_warning` in drive_xray.py.
+pub fn unreadable_warning(rels: &[String], macos: bool) -> String {
+    let mut sorted: Vec<&String> = rels.iter().collect();
+    sorted.sort();
+    let mut shown: Vec<&str> = sorted.iter().take(5).map(|s| s.as_str()).collect();
+    if rels.len() > 5 {
+        shown.push("...");
+    }
+    let mut msg = format!(
+        "  WARNING: {} folder(s) could not be read; their contents are not in the index: {}",
+        rels.len(), shown.join(", "));
+    if macos {
+        msg.push_str("\n  On macOS, folders such as ~/Library/Mail need Full Disk \
+                      Access: System Settings > Privacy & Security > Full Disk \
+                      Access, add the app that ran this (Terminal, or Python / \
+                      Streamlit), then index again.");
+    }
+    msg
 }
 
 fn read_drive_and_cache(
