@@ -531,8 +531,8 @@ def test_a_broken_rules_file_falls_back_to_the_defaults(rules_file):
 def test_the_other_mac_mail_files_are_email_too(tmp_path):
     """Outlook for Mac keeps the full message in .olk15MsgSource and its
     attachments in .olk15MsgAttach; Apple Mail keeps some attachments as
-    .emlxpart; Thunderbird's mailboxes have no extension, but each has a
-    .msf index beside it."""
+    .emlxpart; Thunderbird keeps a .msf index beside each mailbox -- and the
+    mailbox itself, which has no extension, is recognised by where it is."""
     root = tmp_path / "drive"
     files = [
         "Outlook 15 Profiles/Main Profile/Data/Message Sources/0T/a.olk15MsgSource",
@@ -552,7 +552,8 @@ def test_the_other_mac_mail_files_are_email_too(tmp_path):
     res = search_drives([(db, "Mac")], "kind:email type:file", check_mounted=False)
     names = sorted(Path(h["path"]).name for h in res["hits"])
     assert names == sorted(["a.olk15MsgSource", "b.olk15MsgAttach",
-                            "7.2.emlxpart", "Inbox.msf", "mail.nsf"]), names
+                            "7.2.emlxpart", "Inbox.msf", "Inbox",
+                            "mail.nsf"]), names
 
 
 # ── folders the walk cannot open ─────────────────────────────────────────────
@@ -593,3 +594,115 @@ def test_indexing_reports_a_folder_it_could_not_read(tmp_path):
         locked.chmod(0o755)
     assert r.returncode == 0, r.stderr
     assert "could not be read" in r.stderr and "Library/Mail" in r.stderr, r.stderr
+
+
+# ── mailboxes without an extension ───────────────────────────────────────────
+#
+# Thunderbird keeps each folder as a plain mbox file named "Inbox", "Sent" ...;
+# Eudora for Mac named its mailboxes "In", "Out"; an Apple Mail export keeps
+# its messages in a file called "mbox". No extension rule can see them, so
+# they are recognised by the folders they live in.
+
+@pytest.fixture()
+def legacy_mail(tmp_path):
+    root = tmp_path / "drive"
+    files = {
+        "Library/Thunderbird/Profiles/ab.default/Mail/Local Folders/Inbox": 5000,
+        "Library/Thunderbird/Profiles/ab.default/Mail/Local Folders/Inbox.msf": 100,
+        "Library/Thunderbird/Profiles/ab.default/Mail/Local Folders/Inbox.sbd/CCMAR": 5000,
+        "VAIO/AppData/Roaming/Thunderbird/Profiles/x.default/ImapMail/mail.ualg.pt/INBOX": 5000,
+        "Old Mac/Eudora Folder/Mail Folder/In": 5000,
+        "Export/Inbox.mbox/mbox": 5000,
+        "VAIO/AppData/Local/Packages/microsoft.windowscommunicationsapps_8wekyb3d8bbwe/LocalState/HxStore.hxd": 5000,
+        # extensionless files that are NOT mail
+        "Documents/Mail/README": 5000,
+        "Projects/LICENSE": 5000,
+    }
+    for rel, size in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x" * size)
+    db = tmp_path / "legacy.db"
+    assert dx_py("index", str(root), "--db", str(db), "--label", "Old"
+                 ).returncode == 0
+    return [(db, "Old")]
+
+
+def test_extensionless_mailboxes_are_found_by_kind(legacy_mail):
+    res = search_drives(legacy_mail, "kind:email type:file", check_mounted=False)
+    names = sorted(Path(h["path"]).name for h in res["hits"])
+    assert names == sorted(["Inbox", "Inbox.msf", "CCMAR", "INBOX", "In",
+                            "mbox", "HxStore.hxd"]), names
+
+
+def test_other_extensionless_files_are_not_mail(legacy_mail):
+    res = search_drives(legacy_mail, "kind:email", check_mounted=False)
+    paths = [h["path"] for h in res["hits"]]
+    assert not any(p.endswith(("README", "LICENSE")) for p in paths), paths
+
+
+def test_extensionless_mailboxes_combine_with_size(legacy_mail):
+    res = search_drives(legacy_mail, "kind:email >1KB type:file",
+                        check_mounted=False)
+    assert "Inbox.msf" not in [Path(h["path"]).name for h in res["hits"]]
+    assert "In" in [Path(h["path"]).name for h in res["hits"]]
+
+
+def test_extensionless_mailboxes_count_as_email_in_the_composition(legacy_mail):
+    from drive_xray import drive_composition
+    by_kind = drive_composition(legacy_mail)["drives"][0]["by_kind"]
+    # 5 mailboxes and HxStore.hxd at 5000 bytes each, plus the 100-byte .msf
+    assert by_kind["email"]["bytes"] == 6 * 5000 + 100
+    assert by_kind["outros"]["bytes"] == 2 * 5000          # README, LICENSE
+
+
+# ── system folders: only on the disk Windows runs from ───────────────────────
+
+def test_system_folders_are_excluded_on_the_running_windows_drive():
+    from drive_xray import SYSTEM_EXCLUDE_DIRS, system_excludes_for
+    assert system_excludes_for("C:\\", platform="nt",
+                               system_drive="C:") == SYSTEM_EXCLUDE_DIRS
+    assert "AppData" in system_excludes_for("c:\\Users\\r", platform="nt",
+                                            system_drive="C:")
+
+
+@pytest.mark.parametrize("root, platform", [
+    ("E:\\", "nt"),                      # a backup drive on the PC
+    ("D:\\Backups\\VAIO", "nt"),
+    ("/Volumes/4TbMyBook", "posix"),     # the same drive on the Mac
+    ("/", "posix"),
+])
+def test_appdata_is_not_excluded_anywhere_else(root, platform):
+    from drive_xray import system_excludes_for
+    got = system_excludes_for(root, platform=platform, system_drive="C:")
+    assert "AppData" not in got and got == ["node_modules"]
+
+
+def test_the_note_names_skipped_folders_and_flags_appdata():
+    from drive_xray import excluded_note
+    msg = excluded_note(["VAIO/Users/rleite/AppData", "build"])
+    assert "2 folder(s)" in msg and "VAIO/Users/rleite/AppData" in msg
+    assert "Outlook" in msg
+    assert "Outlook" not in excluded_note(["node_modules"])
+
+
+def test_indexing_says_which_folders_the_exclusion_list_skipped(tmp_path):
+    from drive_xray import set_exclusions
+    root = tmp_path / "backup"
+    (root / "Users" / "r" / "AppData" / "Local").mkdir(parents=True)
+    (root / "Users" / "r" / "AppData" / "Local" / "x.ost").write_bytes(b"x")
+    (root / "ok.txt").write_bytes(b"y")
+    db = tmp_path / "b.db"
+    set_exclusions(db, ["AppData"])
+    r = dx_py("index", str(root), "--db", str(db), "--label", "B")
+    assert r.returncode == 0, r.stderr
+    assert "Users/r/AppData" in r.stderr and "Outlook" in r.stderr, r.stderr
+
+
+def test_the_app_seeds_system_folders_through_system_excludes_for():
+    """The app used to add SYSTEM_EXCLUDE_DIRS to every index; it must go
+    through the system-disk check, or backups lose their AppData again."""
+    src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
+        encoding="utf-8")
+    assert "system_excludes_for(expanded)" in src
+    assert "_existing + SYSTEM_EXCLUDE_DIRS" not in src

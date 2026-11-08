@@ -164,6 +164,9 @@ pub fn index_drive(
     if !stats.unreadable.is_empty() {
         eprintln!("{}", unreadable_warning(&stats.unreadable, cfg!(target_os = "macos")));
     }
+    if !stats.excluded_paths.is_empty() {
+        eprintln!("{}", excluded_note(&stats.excluded_paths));
+    }
 
     // -------- phase 2: write the file tree FIRST (no hashes yet) --------
     // Persisting the structure right after the walk means a long scan
@@ -499,6 +502,31 @@ pub fn unreadable_warning(rels: &[String], macos: bool) -> String {
     msg
 }
 
+/// The note printed when the drive's exclusion list pruned folders. Mirrors
+/// `excluded_note` in drive_xray.py.
+pub fn excluded_note(rels: &[String]) -> String {
+    let mut sorted: Vec<&String> = rels.iter().collect();
+    sorted.sort();
+    let mut shown: Vec<&str> = sorted.iter().take(5).map(|s| s.as_str()).collect();
+    if rels.len() > 5 {
+        shown.push("...");
+    }
+    let mut msg = format!(
+        "  note: {} folder(s) skipped by this drive's exclusion list: {}. \
+         Remove them from the list and index again to include them.",
+        rels.len(), shown.join(", "));
+    let appdata = rels.iter().any(|r| {
+        r.rsplit('/').next().map(|n| n.eq_ignore_ascii_case("appdata")).unwrap_or(false)
+    });
+    if appdata {
+        msg.push_str("\n  AppData holds programs' own data, including Outlook \
+                      (.ost/.pst), Thunderbird and Windows Mail. On the disk you \
+                      are running Windows from it is mostly noise; inside a backup \
+                      of another computer it is usually where the mail is.");
+    }
+    msg
+}
+
 fn read_drive_and_cache(
     db_path: &Path,
 ) -> Result<(PathBuf, Option<String>, bool, bool, ReuseCache, Option<i64>)> {
@@ -524,6 +552,14 @@ fn read_drive_and_cache(
 #[cfg(test)]
 mod tests {
     use super::mtimes_equivalent;
+
+    #[test]
+    fn the_excluded_note_flags_appdata() {
+        let msg = super::excluded_note(&["VAIO/Users/r/AppData".to_string(), "b".to_string()]);
+        assert!(msg.contains("2 folder(s)") && msg.contains("VAIO/Users/r/AppData"));
+        assert!(msg.contains("Outlook"));
+        assert!(!super::excluded_note(&["node_modules".to_string()]).contains("Outlook"));
+    }
 
     #[test]
     fn mtime_tolerance() {

@@ -68,6 +68,9 @@ pub struct WalkStats {
     /// the index; they used to be dropped without a word, which is how a
     /// Mac's ~/Library/Mail (needs Full Disk Access) went unnoticed.
     pub unreadable: Vec<String>,
+    /// Folders the drive's exclusion list pruned (rel_path), so the run can
+    /// say which: an AppData inside a backup holds that machine's mail.
+    pub excluded_paths: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -355,6 +358,7 @@ pub fn walk(root: &Path, one_fs: bool, skip_cloud: bool,
                 // root-relative path) and its whole subtree.
                 if !exclusions.is_empty() && exclusions.matches(&name, &rel) {
                     stats.excluded += 1;
+                    stats.excluded_paths.push(rel.clone());
                     continue;
                 }
                 // --skip-cloud: prune cloud-sync folders entirely.
@@ -462,6 +466,18 @@ mod tests {
 
     fn rel_paths(res: &WalkResult) -> Vec<String> {
         res.entries.iter().map(|e| e.rel_path.clone()).collect()
+    }
+
+    #[test]
+    fn excluded_folders_are_listed_by_path() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        create_dir_all(r.join("VAIO/Users/rleite/AppData/Local/Microsoft/Outlook")).unwrap();
+        write(r.join("VAIO/Users/rleite/AppData/Local/Microsoft/Outlook/r.ost"), b"x").unwrap();
+        write(r.join("ok.txt"), b"y").unwrap();
+        let res = walk(r, false, false, &["AppData".to_string()]).unwrap();
+        assert_eq!(res.stats.excluded, 1);
+        assert_eq!(res.stats.excluded_paths, vec!["VAIO/Users/rleite/AppData".to_string()]);
     }
 
     #[cfg(unix)]

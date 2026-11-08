@@ -49,7 +49,7 @@ from drive_xray import (
     generate_backup_script,
     verify_file, execute_file_action, QUARANTINE_DIR, AUDIT_LOG,
     read_config, write_config, get_db_dir, import_folder,
-    get_exclusions, set_exclusions, SYSTEM_EXCLUDE_DIRS,
+    get_exclusions, set_exclusions, SYSTEM_EXCLUDE_DIRS, system_excludes_for,
     tags_get, tags_set, tags_search, notes_get, notes_get_all, notes_set,
     compute_auto_tags, AUTO_TAGS_YAML_PATH, write_default_auto_tag_rules,
     get_auto_tag_rules,
@@ -1099,8 +1099,14 @@ with st.sidebar:
                     # engines read the db's exclusion list at walk time, and a
                     # fresh index wipes entries/snapshots/drive but preserves
                     # exclusions.
+                    # Only the drive Windows runs from gets the Windows
+                    # names (system_excludes_for): an AppData inside a backup
+                    # holds that machine's mail.
                     _existing = get_exclusions(_db_out) if _db_out.exists() else []
-                    set_exclusions(_db_out, _existing + SYSTEM_EXCLUDE_DIRS)
+                    _sysx = [d for d in system_excludes_for(expanded)
+                             if d not in _existing]
+                    if _sysx:
+                        set_exclusions(_db_out, _existing + _sysx)
                 start_indexer(expanded, label, do_full, one_fs, skip_cloud)
                 st.rerun()
 
