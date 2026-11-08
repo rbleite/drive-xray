@@ -258,3 +258,50 @@ def test_the_rust_banner_reports_the_same_schema_as_python():
     assert set(found) == {SCHEMA_VERSION}, (
         f"Rust banner mentions schema v{sorted(set(found))}, Python "
         f"SCHEMA_VERSION is {SCHEMA_VERSION}")
+
+
+# ── which dx the app uses when it finds several ──────────────────────────────
+#
+# Reported twice in one evening: `brew upgrade` installed dx 1.6.2, and the
+# app kept running a forgotten local copy -- first a 1.6.1 build under
+# rust/target/, then a hand-copied 1.6.0 next to app.py -- because it took the
+# first working dx in a fixed order.
+
+from drive_xray import pick_newest_dx  # noqa: E402
+
+
+def test_the_newest_dx_wins_over_an_older_copy_found_first():
+    found = [("/Users/x/tools/drive-xray/dx", "1.6.0"),
+             ("/opt/homebrew/bin/dx", "1.6.2")]
+    assert pick_newest_dx(found) == ("/opt/homebrew/bin/dx", "1.6.2")
+
+
+def test_versions_compare_as_numbers_not_text():
+    """'1.10.0' is newer than '1.9.0' -- a string comparison says otherwise."""
+    found = [("a", "1.9.0"), ("b", "1.10.0")]
+    assert pick_newest_dx(found) == ("b", "1.10.0")
+
+
+def test_a_tie_keeps_the_search_order():
+    """Same version in two places: the checkout's own build stays preferred,
+    as it always was."""
+    found = [("rust/target/universal/dx", "1.6.2"),
+             ("/opt/homebrew/bin/dx", "1.6.2")]
+    assert pick_newest_dx(found)[0] == "rust/target/universal/dx"
+
+
+def test_nothing_found_is_none():
+    assert pick_newest_dx([]) is None
+
+
+def test_the_app_chooses_by_version_not_by_first_match():
+    """The selection must stay in app.py's lookup: an early `return` inside
+    the candidate loop would bring the shadowing straight back."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
+        encoding="utf-8")
+    body = src[src.index("def _dx_command_prefix"):
+               src.index("DX_CMD, DX_FALLBACK_REASON, DX_BIN_VERSION")]
+    assert "pick_newest_dx(found)" in body
+    loop = body[body.index("for cand in cands:"):body.index("best = pick_newest_dx")]
+    assert "return" not in loop, "the candidate loop returns on first match"

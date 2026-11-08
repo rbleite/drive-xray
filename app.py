@@ -38,7 +38,7 @@ from drive_xray import (
     open_db, fill_full_hashes, compute_dir_hashes, human,
     get_hash_version, HASH_VERSION, DX_VERSION, _duplicate_rows,
     dx_supports_schema, _version_tuple, MIN_DX_VERSION, SCHEMA_VERSION,
-    engine_status,
+    engine_status, pick_newest_dx,
     compute_folder_sizes, generate_cleanup_script,
     build_cleanup_plan, render_cleanup_script, execute_cleanup_plan,
     default_script_flavor, cleanup_script_suffix,
@@ -143,16 +143,18 @@ def _dx_command_prefix() -> tuple[list[str], str, str]:
     """Resolve the indexer command prefix once. Returns (cmd, reason, version)
     where reason explains a Python fallback ("" when Rust is used) and
     version is the dx binary's self-reported version ("" for Python).
-    Order of preference:
-      1. $DRIVE_XRAY_DX env var (explicit override)
-      2. ./rust/target/{universal,release,debug}/dx adjacent to this file
-      3. dx(.exe) next to app.py (the README's drop-in install on Windows)
-      4. well-known install dirs — Finder/Dock launches often have a PATH
+    $DRIVE_XRAY_DX, when set and working, wins outright (explicit override).
+    Otherwise every candidate below is probed and the NEWEST working one is
+    used (pick_newest_dx); the order only breaks ties:
+      1. ./rust/target/{universal,release,debug}/dx adjacent to this file
+      2. dx(.exe) next to app.py (the README's drop-in install on Windows)
+      3. well-known install dirs — Finder/Dock launches often have a PATH
          without /opt/homebrew/bin, which made the engine flip between
          Rust and Python depending on how the app was started
-      5. `dx` on PATH
-      6. fall back to Python: [sys.executable, drive_xray.py]
-    Every candidate must pass a `dx --version` probe before being used.
+      4. `dx` on PATH
+    With none working, fall back to Python: [sys.executable, drive_xray.py].
+    Taking the first match instead let a forgotten local copy (a 1.6.0 dx
+    next to app.py) shadow a `brew upgrade` to 1.6.2.
     """
     rejected: list[str] = []
 
@@ -177,16 +179,26 @@ def _dx_command_prefix() -> tuple[list[str], str, str]:
              here / exe]
     if os.name != "nt":
         cands += [Path("/opt/homebrew/bin/dx"), Path("/usr/local/bin/dx")]
+    on_path = shutil.which("dx")
+    if on_path:
+        cands.append(Path(on_path))
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for cand in cands:
+        try:
+            key = str(cand.resolve())
+        except OSError:
+            key = str(cand)
+        if key in seen:             # /opt/homebrew/bin/dx is also on PATH
+            continue
+        seen.add(key)
         if cand.is_file() and os.access(cand, os.X_OK):
             got = try_cand(cand)
             if got:
-                return got[0], "", got[1]
-    on_path = shutil.which("dx")
-    if on_path:
-        got = try_cand(on_path)
-        if got:
-            return got[0], "", got[1]
+                found.append((got[0][0], got[1]))
+    best = pick_newest_dx(found)
+    if best:
+        return [best[0]], "", best[1]
     reason = ("rejected: " + ", ".join(rejected)) if rejected else "dx not found"
     return [sys.executable, str(SCRIPT)], reason, ""
 
