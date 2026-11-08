@@ -296,9 +296,10 @@ def staged_db(db: Path):
 # ---------------------------------------------------------------------------
 # Auto-tag rules — map sets of file extensions to a human label.
 #
-# The built-in defaults below are used unless the user provides an editable
-# override at AUTO_TAGS_YAML_PATH (~/.config/drive-xray/auto_tags.yaml), in
-# which case that file wins entirely. Format:  <tag>: [ext1, ext2, ...].
+# The built-in defaults below apply unless the user's editable file at
+# AUTO_TAGS_YAML_PATH (~/.config/drive-xray/auto_tags.yaml) says otherwise,
+# category by category -- see get_auto_tag_rules. Format:
+# <tag>: [ext1, ext2, ...].
 # Compound extensions (fastq.gz, vcf.gz, tar.gz …) are handled by _file_ext().
 # Rules apply in order; a folder can receive multiple tags.
 # ---------------------------------------------------------------------------
@@ -381,28 +382,53 @@ def _rules_to_ordered_dict(rules: list[tuple[frozenset, str]]) -> dict:
 
 
 def get_auto_tag_rules() -> list[tuple[frozenset, str]]:
-    """Return the active auto-tag rules: the user's YAML override if present
-    and parseable, otherwise the built-in defaults. Never raises — a broken
-    override silently falls back to defaults."""
-    if AUTO_TAGS_YAML_PATH.exists():
-        try:
-            data = yaml.safe_load(AUTO_TAGS_YAML_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and data:
-                rules: list[tuple[frozenset, str]] = []
-                for tag, exts in data.items():
-                    if not exts:
-                        continue
-                    clean = frozenset(
-                        str(e).lower().lstrip(".").strip()
-                        for e in exts if str(e).strip()
-                    )
-                    if clean:
-                        rules.append((clean, str(tag)))
-                if rules:
-                    return rules
-        except Exception:
-            pass
-    return DEFAULT_AUTO_TAG_RULES
+    """The active auto-tag rules: the user's file merged over the defaults.
+
+    The file used to replace the defaults entirely, and `dx auto-tags --init`
+    writes it as a full copy of them. So the taxonomy froze on the day the
+    file was made: a user whose file predated `jogos` and `email` saw
+    neither, `kind:email` failed with "unknown kind", and nothing said why.
+
+    Now the file decides, per category:
+      * a category it lists uses the file's extensions (its order first);
+      * a category it lists with an empty list ([] or nothing) is turned off;
+      * a built-in category it does not mention keeps its built-in rule,
+        minus any extension the file has already given to another category,
+        so moving `iso` from jogos to arquivo still moves it.
+    Names are compared ignoring case. Never raises: an unreadable file falls
+    back to the defaults.
+    """
+    if not AUTO_TAGS_YAML_PATH.exists():
+        return DEFAULT_AUTO_TAG_RULES
+    try:
+        data = yaml.safe_load(AUTO_TAGS_YAML_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return DEFAULT_AUTO_TAG_RULES
+    if not isinstance(data, dict) or not data:
+        return DEFAULT_AUTO_TAG_RULES
+
+    rules: list[tuple[frozenset, str]] = []
+    named: set[str] = set()
+    claimed: set[str] = set()
+    try:
+        for tag, exts in data.items():
+            named.add(str(tag).casefold())
+            clean = frozenset(
+                str(e).lower().lstrip(".").strip()
+                for e in (exts or []) if str(e).strip()
+            )
+            if clean:
+                rules.append((clean, str(tag)))
+                claimed |= clean
+    except Exception:
+        return DEFAULT_AUTO_TAG_RULES
+    for exts, tag in DEFAULT_AUTO_TAG_RULES:
+        if tag.casefold() in named:
+            continue
+        left = frozenset(exts - claimed)
+        if left:
+            rules.append((left, tag))
+    return rules or DEFAULT_AUTO_TAG_RULES
 
 
 def _active_compounds(rules: list[tuple[frozenset, str]]) -> tuple[str, ...]:
@@ -425,6 +451,9 @@ def write_default_auto_tag_rules(overwrite: bool = False) -> Path:
         "# Extensions are case-insensitive; compound extensions like\n"
         "# fastq.gz / vcf.gz / tar.gz work. A folder gets a tag when it\n"
         "# contains at least one file with a matching extension.\n"
+        "# A built-in category this file does not mention still applies,\n"
+        "# so new ones in later versions appear on their own; list one\n"
+        "# with [] to turn it off.\n"
         "# Delete this file to restore the built-in defaults.\n\n"
     )
     body = yaml.safe_dump(
@@ -4776,6 +4805,10 @@ def parse_date_range(text: str) -> tuple[float, float]:
 _OPS = (">=", "<=", ">", "<")
 # a term that is nothing but an operator: "> 1GB" typed with a space
 _LONE_OP_RE = re.compile(r"^(>=|<=|>|<)$")
+# the fields parse_query understands; `kind: email` is only rejoined for these,
+# so a name search that happens to end in a colon is left alone
+_QUERY_FIELDS = {"size", "bytes", "modified", "mtime", "date", "changed",
+                 "type", "drive", "path", "name", "kind", "tipo"}
 # "*.mkv>1GB" — a value glued to an operator. The prefix must NOT be a bare
 # word, or this would tear "modified>=2024" and "size>1GB" apart.
 _GLUED_RE = re.compile(r"^(.+?)(>=|<=|>|<)(.+)$")
@@ -4790,7 +4823,8 @@ def _normalise_terms(tokens: list[tuple[str, bool]]) -> list[str]:
     reported no results. A query that silently means something else is worse
     than one that fails — it looks like an answer.
 
-    Four spellings, all of them reasonable, and only one used to work:
+    Four spellings, all of them reasonable, and only one used to work (the
+    same goes for a field and its value: `kind: email`, `kind :email`):
 
         *.mkv >1GB      ok before
         *.mkv > 1GB     became a name search for ">" and "1gb"
@@ -4833,6 +4867,30 @@ def _normalise_terms(tokens: list[tuple[str, bool]]) -> list[str]:
                 out_quoted.pop()
             emit(joined)
             i += 2
+            continue
+
+        # "kind: email" / "kind : email" / "kind :email" — a field and its
+        # value pulled apart by a space. `kind: email` arrived as `kind:` and
+        # `email`, and was rejected as `unknown kind ''`.
+        field_colon = re.fullmatch(r"(\w+):", text)
+        if field_colon and field_colon.group(1).lower() in _QUERY_FIELDS:
+            if i + 1 >= len(tokens):
+                raise QueryError(f"{text!r} needs a value after the colon")
+            emit(text + tokens[i + 1][0])
+            i += 2
+            continue
+        if (text.startswith(":") and out and not out_quoted[-1]
+                and out[-1].lower() in _QUERY_FIELDS):
+            field = out.pop()
+            out_quoted.pop()
+            if text == ":":
+                if i + 1 >= len(tokens):
+                    raise QueryError(f"{field + ':'!r} needs a value after the colon")
+                emit(field + ":" + tokens[i + 1][0])
+                i += 2
+            else:
+                emit(field + text)
+                i += 1
             continue
 
         # "*.mkv>1GB" — split, unless the prefix is a field name

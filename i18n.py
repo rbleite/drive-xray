@@ -250,9 +250,9 @@ TRANSLATIONS = {
         "auto_tags_legend_note": "pastas com tags automáticas (sem tag manual)",
         "at_rules_title": "⚙️ Regras de auto-tag ({n} regras)",
         "at_rules_src_default": "A usar as regras predefinidas (embutidas).",
-        "at_rules_src_custom": "A usar o teu ficheiro de regras personalizado.",
+        "at_rules_src_custom": "A usar o teu ficheiro de regras; as categorias embutidas que ele não menciona continuam a aplicar-se.",
         "at_rules_init_btn": "Criar ficheiro editável",
-        "at_rules_edit_hint": "Edita este ficheiro (formato `tag: [ext1, ext2]`); as alterações aplicam-se de imediato.",
+        "at_rules_edit_hint": "Edita este ficheiro (formato `tag: [ext1, ext2]`); as alterações aplicam-se de imediato. Para desligar uma categoria embutida, lista-a com `[]`.",
         "at_rules_path": "Ficheiro de regras",
         "at_rules_created": "Ficheiro criado — edita-o para personalizar as regras.",
         # cold data (archive candidates) — Map tab
@@ -660,9 +660,9 @@ TRANSLATIONS = {
         "auto_tags_legend_note": "folders with auto-detected tags (no manual tag)",
         "at_rules_title": "⚙️ Auto-tag rules ({n} rules)",
         "at_rules_src_default": "Using the built-in default rules.",
-        "at_rules_src_custom": "Using your custom rules file.",
+        "at_rules_src_custom": "Using your rules file; built-in categories it does not mention still apply.",
         "at_rules_init_btn": "Create editable file",
-        "at_rules_edit_hint": "Edit this file (format `tag: [ext1, ext2]`); changes apply immediately.",
+        "at_rules_edit_hint": "Edit this file (format `tag: [ext1, ext2]`); changes apply immediately. To turn a built-in category off, list it with `[]`.",
         "at_rules_path": "Rules file",
         "at_rules_created": "File created — edit it to customise the rules.",
         # cold data (archive candidates) — Map tab
