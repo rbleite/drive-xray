@@ -39,7 +39,7 @@ import sys
 import time
 import unicodedata
 from collections import defaultdict
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import yaml
 
@@ -49,7 +49,7 @@ READ_CHUNK = 1024 * 1024
 # v1 = head + tail; v2 = head + middle + tail (defends against bio formats like
 # BAM/VCF where header/footer are stable but body varies).
 HASH_VERSION = 2
-DX_VERSION = "1.6.3"
+DX_VERSION = "1.6.4"
 
 # First dx release whose Rust engine understands SCHEMA_VERSION. The two move
 # independently -- Python migrates a .db the moment the app runs, while the
@@ -336,19 +336,18 @@ DEFAULT_AUTO_TAG_RULES: list[tuple[frozenset, str]] = [
     #   Apple Mail        emlx / partial.emlx per message, emlxpart for an
     #                     attachment kept apart, .mbox (a folder: found by its
     #                     name in a search)
-    #   Thunderbird       msf -- only the index. The mailboxes themselves are
-    #                     files with NO extension (Inbox, Sent), which no
-    #                     extension rule can see; the .msf beside each one
-    #                     at least marks where they are
-    #   other             eml, mbx (Eudora), dbx (Outlook Express),
-    #                     nsf (Lotus Notes)
-    # compose counts files, so extensionless mailboxes (Thunderbird, an Apple
-    # Mail export's inner "mbox") are not in the email total.
+    #   Thunderbird       msf (the index beside each mailbox)
+    #   Windows Mail      hxd (HxStore.hxd, the Windows 10/11 Mail app)
+    #   Eudora, Windows   mbx
+    #   other             eml, dbx (Outlook Express), nsf (Lotus Notes)
+    # Thunderbird's mailboxes, Eudora for Mac's and the "mbox" inside an
+    # Apple Mail export have NO extension; EXTENSIONLESS_KINDS recognises
+    # them by where they live.
     (frozenset({"pst", "ost", "nst", "msg", "olm",
                 "olk14message", "olk15message", "olk14msgsource",
                 "olk15msgsource", "olk14msgattach", "olk15msgattach",
                 "emlx", "emlxpart", "eml", "mbox", "msf", "mbx", "dbx",
-                "nsf"}),
+                "nsf", "hxd"}),
         "email"),
     # Media
     (frozenset({"mp3", "flac", "wav", "ogg", "aac", "m4a",
@@ -392,6 +391,38 @@ def _rules_to_ordered_dict(rules: list[tuple[frozenset, str]]) -> dict:
     """{tag: [ext, ...]} preserving rule order, for YAML round-tripping.
     Extensions are sorted for stable output."""
     return {tag: sorted(exts) for exts, tag in rules}
+
+
+# Files with NO extension that still belong to a category, recognised by the
+# folders they sit in. Each entry: (category, regex on the rel_path, coarse
+# SQL LIKE patterns on LOWER(full_path) that every match satisfies).
+#
+# Mail is the case that needs it: Thunderbird (and Postbox / SeaMonkey, built
+# on it) keeps each folder as an mbox file named just "Inbox", "Sent" ...;
+# Eudora for Mac named its mailboxes "In", "Out", "Trash"; an Apple Mail
+# export puts the messages in a file called "mbox" inside the .mbox folder.
+# An extension rule cannot see any of them.
+EXTENSIONLESS_KINDS: list[tuple[str, "re.Pattern[str]", tuple[str, ...]]] = [
+    ("email",
+     re.compile(r"(?:^|/)(?:\.?thunderbird|postbox|seamonkey|icedove)/"
+                r"(?:profiles/)?[^/]+/(?:mail|imapmail)/"
+                r"|(?:^|/)eudora folder/mail folder/"
+                r"|\.mbox/mbox$", re.IGNORECASE),
+     ("%/mail/%", "%/imapmail/%", "%eudora folder/mail folder/%",
+      "%.mbox/mbox")),
+]
+
+
+def extensionless_kind(rel_path: str) -> str | None:
+    """The category of a file that has no extension, from where it lives;
+    None for anything else (including every file that has an extension)."""
+    rel = str(rel_path or "").replace("\\", "/")
+    if _file_ext(rel.rsplit("/", 1)[-1]):
+        return None
+    for kind, rx, _likes in EXTENSIONLESS_KINDS:
+        if rx.search(rel):
+            return kind
+    return None
 
 
 def get_auto_tag_rules() -> list[tuple[frozenset, str]]:
@@ -2147,6 +2178,9 @@ def _index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
     # on macOS ~/Library/Mail needs Full Disk Access, so a Mac's own mailbox
     # was missing from its index and `kind:email` simply found nothing there.
     unreadable: list[str] = []
+    # Folders this drive's exclusion list pruned, so the run can say which:
+    # an AppData inside a Windows backup holds that machine's mail.
+    excluded_paths: list[str] = []
 
     def _unreadable(e: OSError) -> None:
         try:
@@ -2168,6 +2202,7 @@ def _index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
                         or any(_rel == e or _rel.startswith(e + "/")
                                for e in _excl_paths)):
                     excluded_skipped += 1
+                    excluded_paths.append(_rel)
                 else:
                     _kept.append(d)
             dirnames[:] = _kept
@@ -2317,6 +2352,47 @@ def _index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
     print(f"\r  indexed {total_files} files / {total_dirs} dirs / {total_size/1e9:.2f} GB in {elapsed:.1f}s{extra}", file=sys.stderr)
     if unreadable:
         print(unreadable_warning(unreadable), file=sys.stderr)
+    if excluded_paths:
+        print(excluded_note(excluded_paths), file=sys.stderr)
+
+
+def excluded_note(rels: list[str]) -> str:
+    """The note printed when this drive's exclusion list pruned folders.
+
+    The exclusions are applied silently by design, which is right for
+    C:\\Windows and wrong for the AppData inside a backup of an old laptop:
+    that is where Outlook, Thunderbird and Windows Mail kept their mail, and
+    a search for it then finds nothing without saying why."""
+    shown = ", ".join(sorted(rels)[:5]) + (", ..." if len(rels) > 5 else "")
+    msg = (f"  note: {len(rels)} folder(s) skipped by this drive's exclusion"
+           f" list: {shown}. Remove them from the list and index again to"
+           f" include them.")
+    if any(r.rsplit("/", 1)[-1].casefold() == "appdata" for r in rels):
+        msg += ("\n  AppData holds programs' own data, including Outlook"
+                " (.ost/.pst), Thunderbird and Windows Mail. On the disk you"
+                " are running Windows from it is mostly noise; inside a backup"
+                " of another computer it is usually where the mail is.")
+    return msg
+
+
+def system_excludes_for(root, platform: str | None = None,
+                        system_drive: str | None = None) -> list[str]:
+    """The system folders to exclude when indexing `root`.
+
+    They used to be added to every index started with "ignore system
+    folders" ticked (the default) -- and matched by name anywhere, so the
+    AppData inside a backup of an old laptop was skipped along with the live
+    system's. That AppData is where Outlook, Thunderbird and Windows Mail
+    kept their mail. The Windows names now apply only to the drive Windows
+    is running from; elsewhere only node_modules is skipped.
+    """
+    platform = platform or os.name
+    if platform == "nt":
+        sysdrive = (system_drive or os.environ.get("SystemDrive") or "C:")
+        drive = PureWindowsPath(str(root)).drive
+        if drive and drive.rstrip("\\").upper() == sysdrive.rstrip("\\").upper():
+            return list(SYSTEM_EXCLUDE_DIRS)
+    return ["node_modules"]
 
 
 def unreadable_warning(rels: list[str], platform: str | None = None) -> str:
@@ -4333,7 +4409,13 @@ def drive_composition(db_labels: list[tuple[Path, str]],
         for rel, size, fh, ph in rows:
             size = size or 0
             name = rel.replace("\\", "/").rsplit("/", 1)[-1]
-            kind = ext_to_kind.get(_file_ext(name, compounds), OTHER)
+            ext = _file_ext(name, compounds)
+            kind = ext_to_kind.get(ext, OTHER)
+            if kind == OTHER and not ext:
+                # a Thunderbird mailbox, say: no extension, known by place
+                k = extensionless_kind(rel)
+                kind = next((t for t in kind_order
+                             if k and t.casefold() == k.casefold()), OTHER)
             info["bytes"] += size
             info["files"] += 1
             info["by_kind"][kind]["bytes"] += size
@@ -5107,6 +5189,12 @@ def _name_matches(segment: str, patterns: list[str]) -> bool:
     return True
 
 
+def _selected_path_kinds(f: dict) -> set[str]:
+    """The EXTENSIONLESS_KINDS categories this query asked for by kind:."""
+    asked = {_fold(k) for k in f.get("kinds", [])}
+    return {kind for kind, _rx, _l in EXTENSIONLESS_KINDS if _fold(kind) in asked}
+
+
 def _sql_prefilter(f: dict) -> tuple[str, list]:
     """The part of the query SQLite can do cheaply. Name globs are refined in
     Python afterwards -- LIKE cannot express them, and its case rules do not
@@ -5127,9 +5215,18 @@ def _sql_prefilter(f: dict) -> tuple[str, list]:
     # A leading literal in a glob is a free prefix filter for SQLite.
     if f["exts"]:
         # one LIKE per extension is still far cheaper than reading every row
-        ors = " OR ".join("LOWER(p.segment) LIKE ?" for _ in f["exts"])
-        where.append(f"({ors})")
+        ors = [" OR ".join("LOWER(p.segment) LIKE ?" for _ in f["exts"])]
         params.extend(f"%.{e}" for e in sorted(f["exts"]))
+        # extensionless mailboxes etc.: files with no dot in the name under
+        # one of the folders EXTENSIONLESS_KINDS knows; refined in Python
+        likes = [lk for kind, _rx, pats in EXTENSIONLESS_KINDS
+                 if kind in _selected_path_kinds(f) for lk in pats]
+        if likes:
+            ors.append("(c.is_dir = 0 AND p.segment NOT LIKE '%.%' AND ("
+                       + " OR ".join("LOWER(p.full_path) LIKE ?" for _ in likes)
+                       + "))")
+            params.extend(likes)
+        where.append("(" + " OR ".join(ors) + ")")
     for pat in f["names"]:
         head = re.split(r"[*?\[]", pat, 1)[0]
         if head:
@@ -5189,7 +5286,9 @@ def search_drives(db_labels, query: str, limit: int = 500,
             for full_path, segment, is_dir, size, mtime in rows:
                 if f["names"] and not _name_matches(segment, f["names"]):
                     continue
-                if f["exts"] and _file_ext(segment or "") not in f["exts"]:
+                if f["exts"] and _file_ext(segment or "") not in f["exts"] and not (
+                        not is_dir
+                        and extensionless_kind(full_path) in _selected_path_kinds(f)):
                     continue
                 total += 1
                 if len(hits) >= limit:

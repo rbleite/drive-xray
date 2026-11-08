@@ -48,15 +48,29 @@ dx find "kind:email >100MB"      # Outlook .pst/.ost/.olm, Apple Mail .emlx/.mbo
 dx find "kind:video kind:musica" # several kinds widen the search
 ```
 
-Not every mailbox has an extension. Thunderbird keeps each folder as a file
-named just `Inbox`, `Sent` …, and an Apple Mail export keeps its messages in a
-file named `mbox` inside the `.mbox` folder. Find those by where they live:
+Not every mailbox has an extension. Thunderbird (and Postbox, SeaMonkey)
+keeps each folder as a file named just `Inbox`, `Sent` …; Eudora for Mac named
+its mailboxes `In`, `Out`; an Apple Mail export keeps its messages in a file
+called `mbox`. `kind:email` recognises those by the folders they live in
+(`…/Profiles/<profile>/Mail/` or `ImapMail/`, `Eudora Folder/Mail Folder/`,
+`<name>.mbox/mbox`), so they are found and counted like any other mail.
+
+To look at a whole mail store at once, search by where it lives:
 
 ```bash
 dx find "path:Library/Mail"                          # Apple Mail
 dx find "path:Thunderbird/Profiles"                  # Thunderbird
 dx find "path:\"Outlook 15 Profiles\""                # Outlook for Mac
+dx find "path:\"Eudora Folder\""                      # Eudora for Mac
 ```
+
+Mail from an old Windows computer usually sits in its `AppData` folder
+(Outlook `.ost`, Windows Live Mail, Thunderbird, the Windows Mail app's
+`HxStore.hxd`). Older indexes may have skipped it: "ignore system folders"
+used to exclude every `AppData`, including the one inside a backup. It now
+applies only to the disk Windows is running from, and indexing prints which
+folders the exclusion list skipped. To include an `AppData` an older index
+left out, remove it from that drive's exclusion list and index again.
 
 The categories are the **same ones that drive auto-tagging** — nanopore, NGS,
 variantes, genómica, imagiologia, PDF, documentos, tabelas, apresentações,

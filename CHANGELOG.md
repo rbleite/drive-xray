@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.4] — 2026-11-08
+
+### Fixed
+- **"Ignore system folders" also hid the mail in backups.** It added
+  `AppData` (and the other Windows system names) to every index, matched by
+  name anywhere -- so the `AppData` inside a backup of an old Windows laptop,
+  where Outlook, Thunderbird and Windows Mail kept their mail, was skipped.
+  The Windows names now apply only to the disk Windows is running from;
+  elsewhere only `node_modules` is skipped. Indexing now also ends with a
+  note naming the folders the drive's exclusion list skipped, and says so
+  plainly when one of them is an `AppData`.
+
+### Added
+- **Mailboxes without an extension count as email:** Thunderbird's (and
+  Postbox's, SeaMonkey's) `Inbox`, `Sent` …, Eudora for Mac's `In`, `Out` …,
+  and the `mbox` inside an Apple Mail export, recognised by the folders they
+  live in. `kind:email` finds them and `dx compose` counts them.
+- **`.hxd`** (the Windows 10/11 Mail app's `HxStore.hxd`) in the email
+  category. Eudora for Windows (`.mbx`) was already in it and is now tested;
+  its `.toc` index is left out on purpose, because LaTeX writes `.toc` files
+  too.
+
 ## [1.6.3] — 2026-11-08
 
 ### Fixed
