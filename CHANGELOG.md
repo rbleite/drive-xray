@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.2] — 2026-11-08
+
 ### Added
 - **An `email` category** for saved mail: Outlook (`.pst`, `.ost`, `.olm`,
   `.msg`, `.olk14Message`/`.olk15Message`), Apple Mail (`.emlx`, `.mbox`) and
@@ -15,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compose` gives email its own line. If you keep your own
   `~/.config/drive-xray/auto_tags.yaml`, it replaces the built-in rules, so
   add `email` there yourself.
+
+### Fixed
+- **Releases would not have built.** The release workflow ran on GitHub's
+  `macos-14` image, retired on 2026-11-02; a job on a retired image is
+  cancelled at once, so the next tag would have published no binary. It now
+  builds on `macos-15` with `MACOSX_DEPLOYMENT_TARGET=11.0` pinned, so the
+  binary still runs on macOS 11 (Big Sur) as the Homebrew formula promises.
+- **Homebrew instructions:** Homebrew 6 refuses formulas from a tap you have
+  not trusted, so installing now needs `brew trust rbleite/tap` once after
+  `brew tap rbleite/tap`. The install docs say so.
 
 ## [1.6.1] — 2026-10-10
 
