@@ -52,9 +52,14 @@ The categories are the **same ones that drive auto-tagging** — nanopore, NGS,
 variantes, genómica, imagiologia, PDF, documentos, tabelas, apresentações,
 email, música, vídeo, imagens, código, scripts, arquivo, base de dados, jogos — so
 anything you add to `~/.config/drive-xray/auto_tags.yaml` becomes searchable
-the moment you add it. There is no second list to maintain. If you created
-that file before a category existed (`email` arrived after 1.6.1), it replaces
-the built-in list entirely, so add the new entry to it yourself.
+the moment you add it. There is no second list to maintain. The file only
+overrides the categories it names: a built-in category it does not mention
+still applies, so a category added in a later version (`email` arrived in
+1.6.2) shows up even if your file is older. To turn a built-in one off, list
+it with `[]`.
+
+A field and its value may be separated by spaces: `kind: email`,
+`drive : 8Tb` and `kind:email` are the same search.
 
 Accents are optional: `kind:genomica` finds `genómica`. An unknown kind lists
 the real ones instead of silently finding nothing. Compound extensions are

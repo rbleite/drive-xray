@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`kind: email` (with a space) failed** with `unknown kind ''`: the space
+  split the field from its value. `kind: email`, `kind :email` and
+  `kind : email` now mean `kind:email`, for every search field.
+- **An old `~/.config/drive-xray/auto_tags.yaml` froze the categories.** The
+  file replaced the built-in rules entirely, and `dx auto-tags --init` writes
+  a full copy of them, so anyone who had created it never got `jogos` or
+  `email`, and `kind:email` reported an unknown kind. The file now overrides
+  only the categories it names; built-in ones it does not mention still apply
+  (minus extensions the file gives to another category), and a category
+  listed with `[]` is turned off.
+
 ## [1.6.2] — 2026-11-08
 
 ### Added

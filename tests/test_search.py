@@ -437,3 +437,92 @@ def test_email_has_its_own_line_in_the_composition(mail_drive):
     rep = drive_composition(mail_drive)
     by_kind = rep["drives"][0]["by_kind"]
     assert by_kind["email"]["bytes"] == 4 * 4096 + 5 * 100
+
+
+# ── spaces between a field and its value ─────────────────────────────────────
+#
+# Reported from the app: `kind: email` failed with "unknown kind ''". The
+# splitter cut on the space, leaving `kind:` with no value and `email` as a
+# name to search for.
+
+@pytest.mark.parametrize("q", ["kind: email", "kind :email", "kind : email",
+                               "KIND: email"])
+def test_a_field_and_its_value_may_be_spaced(q):
+    assert parse_query(q)["exts"] == parse_query("kind:email")["exts"]
+
+
+def test_spacing_works_for_the_other_fields_too():
+    f = parse_query('drive: 8Tb path: "HD Movies" type: folder')
+    assert f["drives"] == ["8tb"]
+    assert f["paths"] == ["hd movies"]
+    assert f["is_dir"] == 1
+
+
+def test_only_real_fields_are_rejoined():
+    """`relatorio: final` is not glued into `relatorio:final`; it still
+    reaches parse_query as two terms, and `relatorio:` is reported as an
+    unknown field exactly as it was before."""
+    from drive_xray import _split_terms
+    assert _split_terms("relatorio: final") == ["relatorio:", "final"]
+    with pytest.raises(QueryError, match="unknown field 'relatorio'"):
+        parse_query("relatorio: final")
+
+
+def test_a_field_with_nothing_after_it_says_so():
+    with pytest.raises(QueryError, match="needs a value"):
+        parse_query("kind:")
+
+
+# ── an old auto_tags.yaml must not freeze the categories ─────────────────────
+#
+# The user's screenshot listed the known kinds without `jogos` or `email`:
+# their auto_tags.yaml was written by `dx auto-tags --init` before either
+# existed, and the file used to replace the built-in rules entirely.
+
+@pytest.fixture()
+def rules_file(tmp_path, monkeypatch):
+    import drive_xray as dx
+    path = tmp_path / "auto_tags.yaml"
+    monkeypatch.setattr(dx, "AUTO_TAGS_YAML_PATH", path)
+    return path
+
+
+def test_an_old_rules_file_still_gets_the_new_categories(rules_file):
+    from drive_xray import known_kinds
+    rules_file.write_text(
+        "NGS: [bam, fastq]\nvídeo: [mkv, mp4]\narquivo: [zip]\n",
+        encoding="utf-8")
+    kinds = known_kinds()
+    assert {"email", "jogos"} <= set(kinds), kinds
+    assert parse_query("kind: email")["exts"] >= {"pst", "olm", "emlx"}
+
+
+def test_the_file_still_overrides_a_category_it_names(rules_file):
+    rules_file.write_text("vídeo: [mkv]\n", encoding="utf-8")
+    assert parse_query("kind:vídeo")["exts"] == {"mkv"}
+
+
+def test_an_empty_list_turns_a_builtin_category_off(rules_file):
+    from drive_xray import known_kinds
+    rules_file.write_text("jogos: []\nvídeo: [mkv]\n", encoding="utf-8")
+    assert "jogos" not in known_kinds()
+
+
+def test_an_extension_the_file_moves_is_not_claimed_twice(rules_file):
+    """Moving iso from jogos to arquivo must not leave iso in jogos as well."""
+    from drive_xray import get_auto_tag_rules
+    rules_file.write_text("arquivo: [zip, iso]\n", encoding="utf-8")
+    owners = [tag for exts, tag in get_auto_tag_rules() if "iso" in exts]
+    assert owners == ["arquivo"], owners
+
+
+def test_the_files_own_categories_come_first(rules_file):
+    from drive_xray import known_kinds
+    rules_file.write_text("meus: [xyz]\n", encoding="utf-8")
+    assert known_kinds()[0] == "meus"
+
+
+def test_a_broken_rules_file_falls_back_to_the_defaults(rules_file):
+    from drive_xray import DEFAULT_AUTO_TAG_RULES, get_auto_tag_rules
+    rules_file.write_text("this: [is: not: yaml", encoding="utf-8")
+    assert get_auto_tag_rules() == DEFAULT_AUTO_TAG_RULES
