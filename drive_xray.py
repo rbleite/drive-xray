@@ -49,7 +49,7 @@ READ_CHUNK = 1024 * 1024
 # v1 = head + tail; v2 = head + middle + tail (defends against bio formats like
 # BAM/VCF where header/footer are stable but body varies).
 HASH_VERSION = 2
-DX_VERSION = "1.6.2"
+DX_VERSION = "1.6.3"
 
 # First dx release whose Rust engine understands SCHEMA_VERSION. The two move
 # independently -- Python migrates a .db the moment the app runs, while the
@@ -328,14 +328,27 @@ DEFAULT_AUTO_TAG_RULES: list[tuple[frozenset, str]] = [
         "tabelas"),
     (frozenset({"pptx", "ppt", "odp", "key"}),
         "apresentações"),
-    # Email: Outlook (pst/ost on Windows, olm export and olk*message on Mac,
-    # msg single messages), Apple Mail (emlx per message, mbox export),
-    # generic eml/mbx, Outlook Express dbx. Apple Mail's .mbox is usually a
-    # folder: `kind:email` finds it by its name, but the composition report
-    # counts files, so an exported .mbox whose data file is a bare "mbox"
-    # (no extension) is not counted there.
-    (frozenset({"pst", "ost", "olm", "msg", "olk14message", "olk15message",
-                "emlx", "eml", "mbox", "mbx", "dbx"}),
+    # Email, by what each program leaves on disk:
+    #   Outlook, Windows  pst (archive), ost (cache), nst (group mail), msg
+    #   Outlook, Mac      olm (export); olk14*/olk15* in the profile's Data:
+    #                     Message (headers), MsgSource (full MIME message),
+    #                     MsgAttach (attachments)
+    #   Apple Mail        emlx / partial.emlx per message, emlxpart for an
+    #                     attachment kept apart, .mbox (a folder: found by its
+    #                     name in a search)
+    #   Thunderbird       msf -- only the index. The mailboxes themselves are
+    #                     files with NO extension (Inbox, Sent), which no
+    #                     extension rule can see; the .msf beside each one
+    #                     at least marks where they are
+    #   other             eml, mbx (Eudora), dbx (Outlook Express),
+    #                     nsf (Lotus Notes)
+    # compose counts files, so extensionless mailboxes (Thunderbird, an Apple
+    # Mail export's inner "mbox") are not in the email total.
+    (frozenset({"pst", "ost", "nst", "msg", "olm",
+                "olk14message", "olk15message", "olk14msgsource",
+                "olk15msgsource", "olk14msgattach", "olk15msgattach",
+                "emlx", "emlxpart", "eml", "mbox", "msf", "mbx", "dbx",
+                "nsf"}),
         "email"),
     # Media
     (frozenset({"mp3", "flac", "wav", "ogg", "aac", "m4a",
@@ -2130,7 +2143,18 @@ def _index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
     root_id = insert(".", None, True, None, None, None, None, False, None)
     parent_id_by_rel["."] = root_id
 
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=lambda e: None):
+    # Folders the walk could not open. They used to vanish without a word:
+    # on macOS ~/Library/Mail needs Full Disk Access, so a Mac's own mailbox
+    # was missing from its index and `kind:email` simply found nothing there.
+    unreadable: list[str] = []
+
+    def _unreadable(e: OSError) -> None:
+        try:
+            unreadable.append(Path(e.filename).relative_to(root).as_posix())
+        except (TypeError, ValueError):
+            unreadable.append(str(e.filename))
+
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=_unreadable):
         # prune skip dirs in-place
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES]
         # prune user-excluded folders: by name (anywhere), glob, or root-path
@@ -2291,6 +2315,23 @@ def _index_drive(root: Path, db_path: Path, label: str | None, do_full: bool,
         extras.append(f"reused {reused}/{total_files} cached hashes")
     extra = f" [{'; '.join(extras)}]" if extras else ""
     print(f"\r  indexed {total_files} files / {total_dirs} dirs / {total_size/1e9:.2f} GB in {elapsed:.1f}s{extra}", file=sys.stderr)
+    if unreadable:
+        print(unreadable_warning(unreadable), file=sys.stderr)
+
+
+def unreadable_warning(rels: list[str], platform: str | None = None) -> str:
+    """The note printed when the walk could not open some folders. Their
+    contents are not in the index, and a search will not find them."""
+    platform = platform or sys.platform
+    shown = ", ".join(sorted(rels)[:5]) + (", ..." if len(rels) > 5 else "")
+    msg = (f"  WARNING: {len(rels)} folder(s) could not be read; their contents"
+           f" are not in the index: {shown}")
+    if platform == "darwin":
+        msg += ("\n  On macOS, folders such as ~/Library/Mail need Full Disk"
+                " Access: System Settings > Privacy & Security > Full Disk"
+                " Access, add the app that ran this (Terminal, or Python /"
+                " Streamlit), then index again.")
+    return msg
 
 
 # ---------- dedupe ----------

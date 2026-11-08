@@ -526,3 +526,70 @@ def test_a_broken_rules_file_falls_back_to_the_defaults(rules_file):
     from drive_xray import DEFAULT_AUTO_TAG_RULES, get_auto_tag_rules
     rules_file.write_text("this: [is: not: yaml", encoding="utf-8")
     assert get_auto_tag_rules() == DEFAULT_AUTO_TAG_RULES
+
+
+def test_the_other_mac_mail_files_are_email_too(tmp_path):
+    """Outlook for Mac keeps the full message in .olk15MsgSource and its
+    attachments in .olk15MsgAttach; Apple Mail keeps some attachments as
+    .emlxpart; Thunderbird's mailboxes have no extension, but each has a
+    .msf index beside it."""
+    root = tmp_path / "drive"
+    files = [
+        "Outlook 15 Profiles/Main Profile/Data/Message Sources/0T/a.olk15MsgSource",
+        "Outlook 15 Profiles/Main Profile/Data/Message Attachments/0T/b.olk15MsgAttach",
+        "Mail/V10/X/INBOX.mbox/Y/Data/Messages/7.2.emlxpart",
+        "Thunderbird/Profiles/p/Mail/Local Folders/Inbox.msf",
+        "Thunderbird/Profiles/p/Mail/Local Folders/Inbox",      # the mailbox
+        "notes/mail.nsf",
+    ]
+    for rel in files:
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x" * 100)
+    db = tmp_path / "mac.db"
+    assert dx_py("index", str(root), "--db", str(db), "--label", "Mac"
+                 ).returncode == 0
+    res = search_drives([(db, "Mac")], "kind:email type:file", check_mounted=False)
+    names = sorted(Path(h["path"]).name for h in res["hits"])
+    assert names == sorted(["a.olk15MsgSource", "b.olk15MsgAttach",
+                            "7.2.emlxpart", "Inbox.msf", "mail.nsf"]), names
+
+
+# ── folders the walk cannot open ─────────────────────────────────────────────
+#
+# On macOS ~/Library/Mail needs Full Disk Access. Without it the walk could
+# not open the folder and dropped its contents silently, so a Mac's own
+# mailbox was absent from its index and `kind:email` found nothing there.
+
+def test_the_warning_names_the_folders_and_explains_macos():
+    from drive_xray import unreadable_warning
+    msg = unreadable_warning(["Library/Mail", "Library/Safari"],
+                             platform="darwin")
+    assert "2 folder(s)" in msg and "Library/Mail" in msg
+    assert "Full Disk Access" in msg
+    assert "Full Disk Access" not in unreadable_warning(["x"], platform="linux")
+
+
+def test_a_long_list_is_cut_short():
+    from drive_xray import unreadable_warning
+    msg = unreadable_warning([f"d{i}" for i in range(9)], platform="linux")
+    assert "9 folder(s)" in msg and msg.rstrip().endswith("...")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+def test_indexing_reports_a_folder_it_could_not_read(tmp_path):
+    root = tmp_path / "home"
+    locked = root / "Library" / "Mail"
+    (locked / "V10").mkdir(parents=True)
+    (locked / "V10" / "1.emlx").write_bytes(b"x")
+    (root / "ok.txt").write_bytes(b"y")
+    locked.chmod(0)
+    try:
+        if os.access(locked, os.R_OK | os.X_OK):
+            pytest.skip("running as root: nothing is unreadable")
+        db = tmp_path / "h.db"
+        r = dx_py("index", str(root), "--db", str(db), "--label", "H")
+    finally:
+        locked.chmod(0o755)
+    assert r.returncode == 0, r.stderr
+    assert "could not be read" in r.stderr and "Library/Mail" in r.stderr, r.stderr

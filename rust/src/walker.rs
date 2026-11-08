@@ -58,12 +58,16 @@ pub struct RawEntry {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct WalkStats {
     pub crossed: usize,           // subtrees pruned because they sit on another fs
     pub cloud_skipped: usize,     // subtrees pruned by --skip-cloud
     pub firmlinks_skipped: usize, // subtrees pruned because inode already visited (APFS firmlinks)
     pub excluded: usize,          // subtrees pruned by a user exclusion
+    /// Folders read_dir refused (rel_path). Their contents are missing from
+    /// the index; they used to be dropped without a word, which is how a
+    /// Mac's ~/Library/Mail (needs Full Disk Access) went unnoticed.
+    pub unreadable: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -297,12 +301,10 @@ pub fn walk(root: &Path, one_fs: bool, skip_cloud: bool,
     while let Some((dp, rel_dir)) = stack.pop() {
         let rd = match fs::read_dir(&dp) {
             Ok(rd) => rd,
-            Err(e) => {
-                // We can still emit an error entry for the directory itself
-                // if it isn't the root — but the simpler choice is to drop
-                // unreadable dirs entirely (matches the Python onerror=None
-                // behavior of os.walk).
-                let _ = e;
+            Err(_) => {
+                // Its contents stay out of the index (as in the Python
+                // engine), but it is recorded so the user is told.
+                stats.unreadable.push(rel_dir.clone());
                 continue;
             }
         };
@@ -460,6 +462,30 @@ mod tests {
 
     fn rel_paths(res: &WalkResult) -> Vec<String> {
         res.entries.iter().map(|e| e.rel_path.clone()).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_folder_is_reported_not_silently_dropped() {
+        use std::os::unix::fs::PermissionsExt;
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        create_dir_all(r.join("Library/Mail/V10")).unwrap();
+        write(r.join("Library/Mail/V10/1.emlx"), b"x").unwrap();
+        write(r.join("ok.txt"), b"y").unwrap();
+        let locked = r.join("Library/Mail");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable_anyway = std::fs::read_dir(&locked).is_ok(); // root ignores modes
+        let res = walk(r, false, false, &[]);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if readable_anyway {
+            return; // running as root: there is nothing unreadable to report
+        }
+        let res = res.unwrap();
+        assert_eq!(res.stats.unreadable, vec!["Library/Mail".to_string()]);
+        let paths: Vec<_> = res.entries.iter().map(|e| e.rel_path.clone()).collect();
+        assert!(paths.iter().any(|p| p == "Library/Mail"), "the folder itself is listed");
+        assert!(!paths.iter().any(|p| p.starts_with("Library/Mail/")));
     }
 
     #[test]
