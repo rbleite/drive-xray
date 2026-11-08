@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.4] — 2026-11-08
+
 ### Fixed
 - **"Ignore system folders" also hid the mail in backups.** It added
   `AppData` (and the other Windows system names) to every index, matched by
@@ -23,7 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the `mbox` inside an Apple Mail export, recognised by the folders they
   live in. `kind:email` finds them and `dx compose` counts them.
 - **`.hxd`** (the Windows 10/11 Mail app's `HxStore.hxd`) in the email
-  category. Eudora for Windows (`.mbx`) was already in it.
+  category. Eudora for Windows (`.mbx`) was already in it and is now tested;
+  its `.toc` index is left out on purpose, because LaTeX writes `.toc` files
+  too.
 
 ## [1.6.3] — 2026-11-08
 

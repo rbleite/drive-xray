@@ -706,3 +706,26 @@ def test_the_app_seeds_system_folders_through_system_excludes_for():
         encoding="utf-8")
     assert "system_excludes_for(expanded)" in src
     assert "_existing + SYSTEM_EXCLUDE_DIRS" not in src
+
+
+def test_eudora_for_windows_mailboxes_are_email(tmp_path):
+    """Eudora for Windows keeps each mailbox as NAME.mbx with a NAME.toc index
+    beside it -- in the program folder on old installs, under Application
+    Data / AppData on later ones. The .toc is left out on purpose: LaTeX
+    writes .toc files too, and an academic's drives are full of them."""
+    root = tmp_path / "VAIO"
+    files = ["Program Files/Qualcomm/Eudora/In.mbx",
+             "Program Files/Qualcomm/Eudora/In.toc",
+             "Users/r/AppData/Roaming/Qualcomm/Eudora/Out.mbx",
+             "Users/r/AppData/Roaming/Qualcomm/Eudora/CCMAR.mbx",
+             "Docs/thesis/thesis.toc"]
+    for rel in files:
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x" * 100)
+    db = tmp_path / "vaio.db"
+    assert dx_py("index", str(root), "--db", str(db), "--label", "VAIO"
+                 ).returncode == 0
+    res = search_drives([(db, "VAIO")], "kind:email", check_mounted=False)
+    names = sorted(Path(h["path"]).name for h in res["hits"])
+    assert names == ["CCMAR.mbx", "In.mbx", "Out.mbx"], names
