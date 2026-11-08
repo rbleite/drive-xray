@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only the categories it names; built-in ones it does not mention still apply
   (minus extensions the file gives to another category), and a category
   listed with `[]` is turned off.
+- **The app used an old `dx` when a newer one was installed.** It took the
+  first working `dx` in a fixed order -- builds in the checkout, a copy next
+  to `app.py`, then Homebrew -- so a forgotten local copy (1.6.0, 1.6.1)
+  shadowed a `brew upgrade` to 1.6.2. It now probes them all and uses the
+  newest; `$DRIVE_XRAY_DX` still overrides.
 
 ## [1.6.2] — 2026-11-08
 

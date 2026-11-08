@@ -2474,6 +2474,23 @@ def dx_supports_schema(binary_version: str) -> bool:
     return _version_tuple(binary_version) >= _version_tuple(MIN_DX_VERSION)
 
 
+def pick_newest_dx(found: list[tuple[str, str]]) -> tuple[str, str] | None:
+    """From (path, version) pairs that all passed the --version probe, the
+    newest; on a tie, the first one listed (the search order's preference).
+
+    The app used to take the FIRST working dx in a fixed order -- builds in
+    the checkout, then a dx next to app.py, then Homebrew. Each of those is a
+    copy someone put there once and forgot, so `brew upgrade` installed 1.6.2
+    while the app kept running a hand-copied 1.6.0, and the sidebar warned
+    the engine was behind with no way to tell which file was to blame.
+    """
+    best: tuple[str, str] | None = None
+    for path, ver in found:
+        if best is None or _version_tuple(ver) > _version_tuple(best[1]):
+            best = (path, ver)
+    return best
+
+
 def engine_status(is_rust: bool, bin_version: str,
                   incompatible: list[tuple[str, str]],
                   ) -> tuple[str, str, dict] | None:
