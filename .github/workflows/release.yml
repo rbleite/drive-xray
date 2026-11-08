@@ -25,7 +25,14 @@ permissions:
 jobs:
   build-and-release:
     name: build universal + publish
-    runs-on: macos-14
+    # macos-14 was retired on 2026-11-02; a job on a retired label is
+    # cancelled at once and the release would silently never build.
+    runs-on: macos-15
+    env:
+      # Pinned so the newer runner cannot raise the minimum macOS the binary
+      # needs. The formula promises Big Sur (11); dx 1.6.1, built on
+      # macos-14, declared 11.0 for arm64.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@v4
 
@@ -56,6 +63,8 @@ jobs:
               target/x86_64-apple-darwin/release/dx
           file target/universal/dx
           ls -lh target/universal/dx
+          # the minimum macOS each slice declares (informational)
+          otool -l target/universal/dx | grep -A4 -E "LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX" || true
 
       - name: compute version + names
         id: vars

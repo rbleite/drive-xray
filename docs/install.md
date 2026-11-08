@@ -154,8 +154,12 @@ byte-identical, so you can switch engines at will.
 
 ```bash
 brew tap rbleite/tap
+brew trust rbleite/tap
 brew install drive-xray
 ```
+
+`brew trust` is needed since Homebrew 6, which refuses to load a formula from
+a third-party tap until you say you trust it.
 
 This installs the universal `dx` binary plus a `drive-xray-ui`
 launcher shortcut.
